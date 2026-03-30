@@ -1,7 +1,7 @@
 {
-  "name": "cleanbot-server",
+  "name": "ssak-server",
   "version": "1.0.0",
-  "description": "클린봇 자동화 서버",
+  "description": "싹싹 입주청소 전문인 플랫폼 서버",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
