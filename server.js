@@ -222,6 +222,65 @@ app.get('/api/stats', async (req, res) => {
   }
 });
 
+// ── SMS 발송 (CoolSMS) ────────────────────────
+app.post('/api/sms/send', async (req, res) => {
+  const { to, msg } = req.body;
+
+  // 환경변수에서 API 키 로드 (사용자에게 노출 안 됨)
+  const apiKey = process.env.COOLSMS_API_KEY;
+  const apiSecret = process.env.COOLSMS_API_SECRET;
+  const from = process.env.COOLSMS_FROM;
+
+  if (!apiKey || !apiSecret || !from) {
+    return res.status(500).json({ error: 'SMS API가 설정되지 않았습니다.' });
+  }
+  if (!to || !msg) {
+    return res.status(400).json({ error: '수신번호와 메시지는 필수입니다' });
+  }
+
+  try {
+    const crypto = require('crypto');
+    const date = new Date().toISOString();
+    const salt = Math.random().toString(36).substring(2, 12);
+    const signature = crypto
+      .createHmac('sha256', apiSecret)
+      .update(date + salt)
+      .digest('hex');
+
+    const msgType = Buffer.byteLength(msg, 'utf8') > 90 ? 'LMS' : 'SMS';
+
+    const response = await fetch('https://api.coolsms.co.kr/messages/v4/send', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `HMAC-SHA256 apiKey=${apiKey}, date=${date}, salt=${salt}, signature=${signature}`
+      },
+      body: JSON.stringify({
+        message: {
+          to: to.replace(/-/g, ''),
+          from: from.replace(/-/g, ''),
+          text: msg,
+          type: msgType
+        }
+      })
+    });
+
+    const data = await response.json();
+
+    if (response.ok) {
+      console.log(`SMS 발송 완료: ${to} (${msgType})`);
+      res.json({ success: true, message: '발송 완료', type: msgType });
+    } else {
+      console.error('SMS 발송 실패:', data);
+      res.status(400).json({ error: data.errorMessage || '발송 실패' });
+    }
+
+  } catch (err) {
+    console.error('SMS 발송 오류:', err);
+    res.status(500).json({ error: '서버 오류가 발생했습니다' });
+  }
+});
+
 // 서버 시작
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
