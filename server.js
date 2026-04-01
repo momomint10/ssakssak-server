@@ -281,6 +281,82 @@ app.post('/api/sms/send', async (req, res) => {
   }
 });
 
+// ── SMS 발송 공통 함수 ───────────────────────────
+async function sendSMSUtil(to, msg) {
+  const apiKey = process.env.COOLSMS_API_KEY;
+  const apiSecret = process.env.COOLSMS_API_SECRET;
+  const from = process.env.COOLSMS_FROM;
+  if (!apiKey || !apiSecret || !from) return { ok: false, error: 'SMS API 미설정' };
+
+  const crypto = require('crypto');
+  const date = new Date().toISOString();
+  const salt = Math.random().toString(36).substring(2, 12);
+  const signature = crypto.createHmac('sha256', apiSecret).update(date + salt).digest('hex');
+  const msgType = Buffer.byteLength(msg, 'utf8') > 90 ? 'LMS' : 'SMS';
+
+  const response = await fetch('https://api.coolsms.co.kr/messages/v4/send', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `HMAC-SHA256 apiKey=${apiKey}, date=${date}, salt=${salt}, signature=${signature}`
+    },
+    body: JSON.stringify({
+      message: { to: to.replace(/-/g,''), from: from.replace(/-/g,''), text: msg, type: msgType }
+    })
+  });
+  return response.ok ? { ok: true } : { ok: false, error: (await response.json()).errorMessage };
+}
+
+// ── 계약서 PDF 업로드 & SMS 발송 ─────────────────
+app.post('/api/contract/upload', async (req, res) => {
+  const { pdfBase64, customerPhone, ownerPhone, customerName, companyName, companyPhone } = req.body;
+
+  if (!pdfBase64 || !customerPhone) {
+    return res.status(400).json({ error: '필수 데이터가 없습니다' });
+  }
+
+  try {
+    // base64 → Buffer 변환
+    const pdfBuffer = Buffer.from(pdfBase64, 'base64');
+    const timestamp = Date.now();
+    const fileName = `${timestamp}_${customerPhone.replace(/-/g,'')}.pdf`;
+    const filePath = `contracts/${fileName}`;
+
+    // Supabase Storage 업로드
+    const { error: uploadError } = await supabase.storage
+      .from('ssak-contracts')
+      .upload(filePath, pdfBuffer, { contentType: 'application/pdf', upsert: true });
+
+    if (uploadError) throw uploadError;
+
+    // Public URL 생성
+    const { data: urlData } = supabase.storage
+      .from('ssak-contracts')
+      .getPublicUrl(filePath);
+
+    const pdfUrl = urlData.publicUrl;
+
+    // 계약서 SMS 문구
+    const customerMsg = `📋 [${companyName||'서프로클린'}] 계약서 안내\n${customerName}님, 계약서가 작성되었습니다.\n\n아래 링크에서 확인 및 보관하세요:\n${pdfUrl}\n\n문의: ${companyPhone||''}`;
+    const ownerMsg = `📋 계약서 체결 완료\n고객: ${customerName}님 (${customerPhone})\n\n계약서 링크:\n${pdfUrl}`;
+
+    // 고객 SMS 발송
+    await sendSMSUtil(customerPhone, customerMsg);
+
+    // 사장님 SMS 발송 (번호가 있고 고객과 다를 때)
+    if (ownerPhone && ownerPhone.replace(/-/g,'') !== customerPhone.replace(/-/g,'')) {
+      await sendSMSUtil(ownerPhone, ownerMsg);
+    }
+
+    console.log(`계약서 업로드 완료: ${filePath}`);
+    res.json({ success: true, pdfUrl });
+
+  } catch (err) {
+    console.error('계약서 업로드 오류:', err);
+    res.status(500).json({ error: '서버 오류: ' + err.message });
+  }
+});
+
 // 서버 시작
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
