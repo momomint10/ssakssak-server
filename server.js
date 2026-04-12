@@ -595,8 +595,8 @@ app.post('/api/booking/token', async (req, res) => {
     }]);
     if (error) throw error;
 
-    const bookingUrl = `https://momomint10.github.io/ssak-app/booking.html?t=${token}`;
-    res.json({ success: true, url: bookingUrl, token });
+    const finalUrl = `https://momomint10.github.io/ssak-app/booking.html?t=${token}`;
+    res.json({ success: true, url: finalUrl, token });
   } catch (err) {
     console.error('토큰 생성 오류:', err);
     res.status(500).json({ error: '서버 오류: ' + err.message });
