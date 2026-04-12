@@ -262,10 +262,9 @@ app.post('/api/sms/send', async (req, res) => {
           from: from.replace(/-/g, ''),
           text: msg,
           type: msgType,
-          // LMS: subject를 공백(' ')으로 명시 설정
-          // → CoolSMS가 첫 줄을 subject로 자동추출하는 것을 막음
-          // → [Web발신] 앞에 아무 내용도 표시되지 않음 (중복 완전 제거)
-          ...(msgType === 'LMS' ? { subject: ' ' } : {})
+          // LMS: 전달받은 subject 사용 (없으면 공백 대신 기본값)
+          // subject가 명시적으로 설정되면 CoolSMS가 첫 줄 자동추출 안 함
+          ...(msgType === 'LMS' ? { subject: (subject && subject.trim()) ? subject.trim().slice(0,20) : '[서프로클린] 문자' } : {})
         }
       })
     });
