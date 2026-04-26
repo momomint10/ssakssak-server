@@ -757,8 +757,16 @@ keepSupabaseAlive();
 setInterval(keepSupabaseAlive, KEEPALIVE_INTERVAL_MS);
 
 // health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString(), uptime: process.uptime() });
+app.get('/health', async (req, res) => {
+  const result = { status: 'ok', timestamp: new Date().toISOString(), uptime: process.uptime() };
+  // community_posts 테이블 존재 여부 확인
+  try {
+    const { error } = await supabase.from('community_posts').select('id').limit(1);
+    result.community_tables = error ? 'missing: ' + error.message : 'ok';
+  } catch(e) { result.community_tables = 'error: ' + e.message; }
+  result.has_database_url = !!process.env.DATABASE_URL;
+  result.supabase_url = process.env.SUPABASE_URL ? process.env.SUPABASE_URL.slice(0,40) + '...' : 'not set';
+  res.json(result);
 });
 
 
@@ -1707,8 +1715,16 @@ keepSupabaseAlive();
 setInterval(keepSupabaseAlive, KEEPALIVE_INTERVAL_MS);
 
 // health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString(), uptime: process.uptime() });
+app.get('/health', async (req, res) => {
+  const result = { status: 'ok', timestamp: new Date().toISOString(), uptime: process.uptime() };
+  // community_posts 테이블 존재 여부 확인
+  try {
+    const { error } = await supabase.from('community_posts').select('id').limit(1);
+    result.community_tables = error ? 'missing: ' + error.message : 'ok';
+  } catch(e) { result.community_tables = 'error: ' + e.message; }
+  result.has_database_url = !!process.env.DATABASE_URL;
+  result.supabase_url = process.env.SUPABASE_URL ? process.env.SUPABASE_URL.slice(0,40) + '...' : 'not set';
+  res.json(result);
 });
 
 
