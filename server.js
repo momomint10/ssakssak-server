@@ -1024,7 +1024,7 @@ app.get('/api/market/listings', async (req, res) => {
     const { search, category, page = 0, limit = 20, seller_id } = req.query;
     let q = supabase.from('market_listings')
       .select('id,title,description,price,category,image_url,status,anon_id,contact,views,created_at')
-      .eq('status', seller_id ? supabase.or('status.eq.available,status.eq.reserved,status.eq.sold') : 'available')
+      .in('status', ['available','reserved'])  // 판매중+예약중 모두 표시, 판매완료는 숨김
       .order('created_at', { ascending: false })
       .range(Number(page)*Number(limit), (Number(page)+1)*Number(limit)-1);
 
