@@ -30,6 +30,25 @@ async function sendPushToAll(payload) {
 }
 const { createClient } = require('@supabase/supabase-js');
  
+
+// ═══════════════════════════════════════════════════════════════
+//  공통 헬퍼
+// ═══════════════════════════════════════════════════════════════
+
+/** 에러 응답 */
+const fail = (res, e, code = 500) =>
+  res.status(code).json({ error: typeof e === 'string' ? e : e.message });
+
+/** 필수 필드 검증 */
+const requireFields = (obj, ...fields) => {
+  const missing = fields.filter(f => !obj[f]);
+  return missing.length ? missing[0] + ' 필요' : null;
+};
+
+/** 권한 확인 (anon_id 기반) */
+const checkOwner = (row, anon_id) =>
+  row && row.anon_id === anon_id ? null : '권한 없음';
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '20mb' }));
@@ -604,7 +623,6 @@ app.get('/health', async (req, res) => {
   res.json(result);
 });
 
-
 // ════════════════════════════════════════════════════════════════════
 // 커뮤니티 API (익명 블라인드 스타일)
 // ════════════════════════════════════════════════════════════════════
@@ -638,14 +656,14 @@ app.get('/api/community/posts', async (req, res) => {
       anon_id: undefined
     }));
     res.json({ success: true, data: posts });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // ── POST /api/community/posts ─────────────────────────────────────
 app.post('/api/community/posts', async (req, res) => {
   try {
     const { anon_id, content, title, imageBase64, imageMime } = req.body;
-    if (!anon_id || !content) return res.status(400).json({ error: '필수 항목 누락' });
+    if (!anon_id || !content) return fail(res, '필수 항목 누락', 400);
     if (content.length > 2000) return res.status(400).json({ error: '내용이 너무 깁니다 (최대 2000자)' });
     if (title && title.length > 100) return res.status(400).json({ error: '제목이 너무 깁니다 (최대 100자)' });
 
@@ -677,7 +695,7 @@ app.post('/api/community/posts', async (req, res) => {
     }]).select().single();
     if (error) throw error;
     res.json({ success: true, data: { ...data, nickname: makeNickname(data.anon_id), anon_id: undefined } });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // ── GET /api/community/posts/:id ──────────────────────────────────
@@ -700,7 +718,7 @@ app.get('/api/community/posts/:id', async (req, res) => {
         is_mine: c.anon_id === anon_id
       }))
     });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // ── DELETE /api/community/posts/:id ──────────────────────────────
@@ -712,7 +730,7 @@ app.delete('/api/community/posts/:id', async (req, res) => {
     if (!post || post.anon_id !== anon_id) return res.status(403).json({ error: '삭제 권한 없음' });
     await supabase.from('community_posts').update({ deleted: true }).eq('id', id);
     res.json({ success: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // ── POST /api/community/posts/:id/like ───────────────────────────
@@ -736,7 +754,7 @@ app.post('/api/community/posts/:id/like', async (req, res) => {
       await supabase.from('community_posts').update({ like_count: (p?.like_count||0)+1 }).eq('id',id);
       res.json({ success: true, liked: true });
     }
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // ── POST /api/community/posts/:id/comments ────────────────────────
@@ -744,7 +762,7 @@ app.post('/api/community/posts/:id/comments', async (req, res) => {
   try {
     const { id } = req.params;
     const { anon_id, content } = req.body;
-    if (!anon_id || !content) return res.status(400).json({ error: '필수 항목 누락' });
+    if (!anon_id || !content) return fail(res, '필수 항목 누락', 400);
     if (content.length > 500) return res.status(400).json({ error: '댓글이 너무 깁니다 (최대 500자)' });
     const { data, error } = await supabase.from('community_comments')
       .insert([{ post_id: id, anon_id, content, deleted: false }]).select().single();
@@ -753,7 +771,7 @@ app.post('/api/community/posts/:id/comments', async (req, res) => {
     const { data: p } = await supabase.from('community_posts').select('comment_count').eq('id',id).single();
     await supabase.from('community_posts').update({ comment_count: (p?.comment_count||0)+1 }).eq('id',id);
     res.json({ success: true, data: { ...data, nickname: makeNickname(data.anon_id), anon_id: undefined } });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // ── DELETE /api/community/comments/:id ───────────────────────────
@@ -767,12 +785,10 @@ app.delete('/api/community/comments/:id', async (req, res) => {
     const { data: p } = await supabase.from('community_posts').select('comment_count').eq('id',c.post_id).single();
     await supabase.from('community_posts').update({ comment_count: Math.max(0,(p?.comment_count||1)-1) }).eq('id',c.post_id);
     res.json({ success: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
-
 // ── 일회성 DB 마이그레이션 엔드포인트 (커뮤니티 테이블 생성) ──────
-
 
 // ── GET /api/stats/monthly (이달 예약 실적) ───────────────────────────
 app.get('/api/stats/monthly', async (req, res) => {
@@ -807,10 +823,9 @@ app.get('/api/stats/monthly', async (req, res) => {
 
     res.json({ success: true, ym, total, done, confirmed, pending, revenue });
   } catch(e) {
-    res.status(500).json({ error: e.message });
+    fail(res, e);
   }
 });
-
 
 // ── POST /send-sms (schedule quickSMS용 공개 엔드포인트) ──────────────
 app.post('/send-sms', async (req, res) => {
@@ -847,10 +862,9 @@ app.post('/send-sms', async (req, res) => {
     if (response.ok) res.json({ success: true });
     else res.status(400).json({ success: false, error: result.errorMessage || '발송 실패' });
   } catch(e) {
-    res.status(500).json({ error: e.message });
+    fail(res, e);
   }
 });
-
 
 // ═══════════════════════════════════════════════════════════════
 //  중고거래 API  (수수료: 거래금액의 0.1%)
@@ -885,7 +899,7 @@ app.get('/api/market/listings', async (req, res) => {
       is_mine: false // 클라이언트에서 anon_id 비교
     }));
     res.json({ success: true, data: items });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // ── POST /api/market/listings ────────────────────────────────
@@ -915,7 +929,7 @@ app.post('/api/market/listings', async (req, res) => {
     }]).select().single();
     if (error) throw error;
     res.json({ success: true, data: { ...data, nickname: makeNickname(data.anon_id) } });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // ── GET /api/market/listings/:id ─────────────────────────────
@@ -930,7 +944,7 @@ app.get('/api/market/listings/:id', async (req, res) => {
     // views increment
     await supabase.from('market_listings').update({ views: (data.views||0) + 1 }).eq('id', id);
     res.json({ success: true, data: { ...data, nickname: makeNickname(data.anon_id) } });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // ── PATCH /api/market/listings/:id/status ────────────────────
@@ -940,11 +954,11 @@ app.patch('/api/market/listings/:id/status', async (req, res) => {
     const { anon_id, status } = req.body; // available | reserved | sold
     if (!['available','reserved','sold'].includes(status)) return res.status(400).json({ error: '잘못된 상태' });
     const { data: existing } = await supabase.from('market_listings').select('anon_id').eq('id', id).single();
-    if (!existing || existing.anon_id !== anon_id) return res.status(403).json({ error: '권한 없음' });
+    if (!existing || existing.anon_id !== anon_id) return fail(res, '권한 없음', 403);
     const { data, error } = await supabase.from('market_listings').update({ status }).eq('id', id).select().single();
     if (error) throw error;
     res.json({ success: true, data });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // ── DELETE /api/market/listings/:id ──────────────────────────
@@ -953,14 +967,11 @@ app.delete('/api/market/listings/:id', async (req, res) => {
     const { id } = req.params;
     const { anon_id } = req.body;
     const { data: existing } = await supabase.from('market_listings').select('anon_id').eq('id', id).single();
-    if (!existing || existing.anon_id !== anon_id) return res.status(403).json({ error: '권한 없음' });
+    if (!existing || existing.anon_id !== anon_id) return fail(res, '권한 없음', 403);
     await supabase.from('market_listings').update({ status: 'deleted' }).eq('id', id);
     res.json({ success: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
-
-
-
 
 // ═══════════════════════════════════════════════════════════════
 //  중고거래 인앱 채팅 API  (개인정보 보호 - 전화번호 미노출)
@@ -970,7 +981,7 @@ app.delete('/api/market/listings/:id', async (req, res) => {
 app.post('/api/market/chats', async (req, res) => {
   try {
     const { listing_id, buyer_anon_id } = req.body;
-    if (!listing_id || !buyer_anon_id) return res.status(400).json({ error: '필수 항목 누락' });
+    if (!listing_id || !buyer_anon_id) return fail(res, '필수 항목 누락', 400);
 
     // 기존 채팅방 조회
     const { data: existing } = await supabase
@@ -1000,7 +1011,7 @@ app.post('/api/market/chats', async (req, res) => {
 
     if (error) throw error;
     res.json({ success: true, data, isNew: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // ── GET /api/market/chats/:id/messages  (메시지 목록) ──────────
@@ -1040,7 +1051,7 @@ app.get('/api/market/chats/:id/messages', async (req, res) => {
       .eq('id', id);
 
     res.json({ success: true, data: data || [], chat });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // ── POST /api/market/chats/:id/messages  (메시지 전송) ─────────
@@ -1048,7 +1059,7 @@ app.post('/api/market/chats/:id/messages', async (req, res) => {
   try {
     const { id } = req.params;
     const { anon_id, content } = req.body;
-    if (!anon_id || !content?.trim()) return res.status(400).json({ error: '필수 항목 누락' });
+    if (!anon_id || !content?.trim()) return fail(res, '필수 항목 누락', 400);
     if (content.length > 500) return res.status(400).json({ error: '메시지 500자 이내' });
 
     const { data: chat } = await supabase
@@ -1088,7 +1099,7 @@ app.post('/api/market/chats/:id/messages', async (req, res) => {
       url: '/market.html',
       tag: 'chat-' + id
     });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // ── GET /api/market/chats/my  (내 채팅 목록) ───────────────────
@@ -1104,9 +1115,8 @@ app.get('/api/market/chats/my', async (req, res) => {
     all.sort((a,b) => new Date(b.updated_at||b.created_at) - new Date(a.updated_at||a.created_at));
 
     res.json({ success: true, data: all });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
-
 
 // ═══════════════════════════════════════════════════════════════
 //  Web Push API
@@ -1131,7 +1141,7 @@ app.post('/api/push/subscribe', async (req, res) => {
     if (error) throw error;
 
     res.json({ success: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // ── DELETE /api/push/subscribe (구독 해제) ─────────────────────
@@ -1141,7 +1151,7 @@ app.delete('/api/push/subscribe', async (req, res) => {
     if (!endpoint) return res.status(400).json({ error: 'endpoint 필요' });
     await supabase.from('push_subscriptions').delete().eq('endpoint', endpoint);
     res.json({ success: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // ── POST /api/push/test (테스트 발송, adminKey 필요) ────────────
@@ -1156,7 +1166,7 @@ app.post('/api/push/test', async (req, res) => {
       url: '/index.html'
     });
     res.json({ success: true, message: '테스트 알림 발송 완료' });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // ═══════════════════════════════════════════════════════════════
@@ -1177,7 +1187,7 @@ app.get('/api/workers', async (req, res) => {
     const { data, error } = await q;
     if (error) throw error;
     res.json({ success: true, data: data || [] });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // POST /api/workers
@@ -1222,7 +1232,7 @@ app.post('/api/workers', async (req, res) => {
       result = data;
     }
     res.json({ success: true, data: result });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // GET /api/workers/my/:anon_id
@@ -1239,7 +1249,7 @@ app.get('/api/workers/:id', async (req, res) => {
     const { data, error } = await supabase.from('worker_profiles').select('*').eq('id', req.params.id).single();
     if (error || !data) return res.status(404).json({ error: '프로필 없음' });
     res.json({ success: true, data });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // PATCH /api/workers/:id/status
@@ -1248,18 +1258,18 @@ app.patch('/api/workers/:id/status', async (req, res) => {
     const { anon_id, status } = req.body;
     if (!['active','inactive'].includes(status)) return res.status(400).json({ error: '잘못된 상태' });
     const { data: existing } = await supabase.from('worker_profiles').select('anon_id').eq('id', req.params.id).single();
-    if (!existing || existing.anon_id !== anon_id) return res.status(403).json({ error: '권한 없음' });
+    if (!existing || existing.anon_id !== anon_id) return fail(res, '권한 없음', 403);
     const { data, error } = await supabase.from('worker_profiles').update({ status }).eq('id', req.params.id).select().single();
     if (error) throw error;
     res.json({ success: true, data });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // POST /api/worker-chats
 app.post('/api/worker-chats', async (req, res) => {
   try {
     const { worker_id, requester_anon_id } = req.body;
-    if (!worker_id || !requester_anon_id) return res.status(400).json({ error: '필수 항목 누락' });
+    if (!worker_id || !requester_anon_id) return fail(res, '필수 항목 누락', 400);
     const { data: existing } = await supabase.from('worker_chats')
       .select('*').eq('worker_id', worker_id).eq('requester_anon_id', requester_anon_id).single();
     if (existing) return res.json({ success: true, data: existing, isNew: false });
@@ -1270,7 +1280,7 @@ app.post('/api/worker-chats', async (req, res) => {
       .insert([{ worker_id, worker_anon_id: worker.anon_id, requester_anon_id }]).select().single();
     if (error) throw error;
     res.json({ success: true, data, isNew: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // GET /api/worker-chats/:id/messages
@@ -1281,7 +1291,7 @@ app.get('/api/worker-chats/:id/messages', async (req, res) => {
     const { data: chat } = await supabase.from('worker_chats').select('*').eq('id', id).single();
     if (!chat) return res.status(404).json({ error: '채팅방 없음' });
     if (chat.requester_anon_id !== anon_id && chat.worker_anon_id !== anon_id)
-      return res.status(403).json({ error: '권한 없음' });
+      return fail(res, '권한 없음', 403);
     let q = supabase.from('worker_messages').select('*').eq('chat_id', id)
       .order('created_at', { ascending: true }).limit(100);
     if (after) q = q.gt('created_at', after);
@@ -1290,7 +1300,7 @@ app.get('/api/worker-chats/:id/messages', async (req, res) => {
     await supabase.from('worker_chats')
       .update(isRequester ? { requester_unread: 0 } : { worker_unread: 0 }).eq('id', id);
     res.json({ success: true, data: data || [], chat });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // POST /api/worker-chats/:id/messages
@@ -1302,7 +1312,7 @@ app.post('/api/worker-chats/:id/messages', async (req, res) => {
     const { data: chat } = await supabase.from('worker_chats').select('*').eq('id', id).single();
     if (!chat) return res.status(404).json({ error: '채팅방 없음' });
     if (chat.requester_anon_id !== anon_id && chat.worker_anon_id !== anon_id)
-      return res.status(403).json({ error: '권한 없음' });
+      return fail(res, '권한 없음', 403);
     const { data, error } = await supabase.from('worker_messages')
       .insert([{ chat_id: id, sender_anon_id: anon_id, content: content.trim() }]).select().single();
     if (error) throw error;
@@ -1312,9 +1322,8 @@ app.post('/api/worker-chats/:id/messages', async (req, res) => {
       ...(isReq ? { worker_unread: (chat.worker_unread||0)+1 } : { requester_unread: (chat.requester_unread||0)+1 })
     }).eq('id', id);
     res.json({ success: true, data });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
-
 
 // ═══════════════════════════════════════════════════════════════
 //  채용정보 API  (job_posts / job_applications)
@@ -1337,14 +1346,14 @@ app.get('/api/jobs', async (req, res) => {
       return { ...job, applicant_count: count||0 };
     }));
     res.json({ success: true, data: withCounts });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // POST /api/jobs  (공고 등록)
 app.post('/api/jobs', async (req, res) => {
   try {
     const { anon_id, contact, title, region, work_date, headcount, daily_rate, skills, description } = req.body;
-    if (!anon_id || !title || !region || !work_date) return res.status(400).json({ error: '필수 항목 누락' });
+    if (!anon_id || !title || !region || !work_date) return fail(res, '필수 항목 누락', 400);
     const { data, error } = await supabase.from('job_posts').insert([{
       anon_id, contact: contact||'', title, region, work_date, headcount: Number(headcount)||1,
       daily_rate: Number(daily_rate)||0, skills: skills||[], description: description||'', status: 'open'
@@ -1370,7 +1379,7 @@ app.post('/api/jobs', async (req, res) => {
       }
     } catch(e2) { console.log('자동매칭 오류:', e2.message); }
     res.json({ success: true, data });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // GET /api/jobs/:id
@@ -1381,7 +1390,7 @@ app.get('/api/jobs/:id', async (req, res) => {
     // 지원자 수
     const { count } = await supabase.from('job_applications').select('*', { count: 'exact', head: true }).eq('job_id', req.params.id);
     res.json({ success: true, data: { ...data, applicant_count: count||0 } });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // PATCH /api/jobs/:id/status  (마감/재오픈)
@@ -1390,11 +1399,11 @@ app.patch('/api/jobs/:id/status', async (req, res) => {
     const { anon_id, status } = req.body;
     if (!['open','closed'].includes(status)) return res.status(400).json({ error: '잘못된 상태' });
     const { data: existing } = await supabase.from('job_posts').select('anon_id').eq('id', req.params.id).single();
-    if (!existing || existing.anon_id !== anon_id) return res.status(403).json({ error: '권한 없음' });
+    if (!existing || existing.anon_id !== anon_id) return fail(res, '권한 없음', 403);
     const { data, error } = await supabase.from('job_posts').update({ status }).eq('id', req.params.id).select().single();
     if (error) throw error;
     res.json({ success: true, data });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // POST /api/jobs/:id/apply  (구직자 지원)
@@ -1431,7 +1440,7 @@ app.post('/api/jobs/:id/apply', async (req, res) => {
     });
 
     res.json({ success: true, data });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // GET /api/jobs/:id/applications  (지원자 목록 - 채용자용)
@@ -1439,12 +1448,12 @@ app.get('/api/jobs/:id/applications', async (req, res) => {
   try {
     const { anon_id } = req.query;
     const { data: job } = await supabase.from('job_posts').select('anon_id').eq('id', req.params.id).single();
-    if (!job || job.anon_id !== anon_id) return res.status(403).json({ error: '권한 없음' });
+    if (!job || job.anon_id !== anon_id) return fail(res, '권한 없음', 403);
     const { data, error } = await supabase.from('job_applications').select('*')
       .eq('job_id', req.params.id).order('created_at', { ascending: false });
     if (error) throw error;
     res.json({ success: true, data: data || [] });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // PATCH /api/jobs/applications/:appId/match  (매칭 확정 → 연락처 공유 + 스케줄 추가)
@@ -1454,7 +1463,7 @@ app.patch('/api/jobs/applications/:appId/match', async (req, res) => {
     const { data: app } = await supabase.from('job_applications').select('*').eq('id', req.params.appId).single();
     if (!app) return res.status(404).json({ error: '지원서 없음' });
     const { data: job } = await supabase.from('job_posts').select('*').eq('id', app.job_id).single();
-    if (!job || job.anon_id !== anon_id) return res.status(403).json({ error: '권한 없음' });
+    if (!job || job.anon_id !== anon_id) return fail(res, '권한 없음', 403);
     // 매칭 확정 + 연락처 쌍방 저장
     await supabase.from('job_applications').update({
       status: 'matched', employer_contact: job.contact, matched_at: new Date().toISOString()
@@ -1486,7 +1495,7 @@ app.patch('/api/jobs/applications/:appId/match', async (req, res) => {
       employer_contact: job.contact,
       work_date: job.work_date, job_title: job.title
     });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // GET /api/jobs/my/applied  (내가 지원한 공고 목록)
@@ -1500,7 +1509,7 @@ app.get('/api/jobs/my/applied', async (req, res) => {
       .order('created_at', { ascending: false });
     if (error) throw error;
     res.json({ success: true, data: data || [] });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 // GET /api/jobs/my/posted  (내가 등록한 공고 목록)
@@ -1519,7 +1528,7 @@ app.get('/api/jobs/my/posted', async (req, res) => {
       return { ...job, applicant_count: count||0 };
     }));
     res.json({ success: true, data: withCounts });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { fail(res, e); }
 });
 
 app.listen(PORT, () => {
