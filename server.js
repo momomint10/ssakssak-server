@@ -1448,9 +1448,9 @@ app.get('/api/jobs/:id/applications', async (req, res) => {
 app.patch('/api/jobs/applications/:appId/match', async (req, res) => {
   try {
     const { anon_id } = req.body;
-    const { data: app } = await supabase.from('job_applications').select('*, job_posts(*)').eq('id', req.params.appId).single();
+    const { data: app } = await supabase.from('job_applications').select('*').eq('id', req.params.appId).single();
     if (!app) return res.status(404).json({ error: '지원서 없음' });
-    const job = app.job_posts;
+    const { data: job } = await supabase.from('job_posts').select('*').eq('id', app.job_id).single();
     if (!job || job.anon_id !== anon_id) return res.status(403).json({ error: '권한 없음' });
 
     // 매칭 확정
