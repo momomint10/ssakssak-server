@@ -1183,16 +1183,31 @@ app.get('/api/workers', async (req, res) => {
 // POST /api/workers
 app.post('/api/workers', async (req, res) => {
   try {
-    const { anon_id, nickname, regions, skills, experience, daily_rate, available_days, bio, avatar_emoji } = req.body;
+    const { anon_id, nickname, regions, skills, experience, daily_rate, available_days, bio, avatar_emoji, photoBase64, photoMime } = req.body;
     if (!anon_id || !nickname) return res.status(400).json({ error: '닉네임을 입력해주세요' });
     if (!regions || !regions.length) return res.status(400).json({ error: '활동 지역을 선택해주세요' });
     if (!skills  || !skills.length)  return res.status(400).json({ error: '보유 기술을 선택해주세요' });
-    const { data: existing } = await supabase.from('worker_profiles').select('id').eq('anon_id', anon_id).single();
+
+    // 프로필 사진 업로드
+    let photo_url = null;
+    if (photoBase64) {
+      try {
+        const mime = photoMime || 'image/jpeg';
+        const ext  = mime.split('/')[1] || 'jpg';
+        const path = 'worker-photos/' + anon_id + '_' + Date.now() + '.' + ext;
+        const buf  = Buffer.from(photoBase64, 'base64');
+        const { error: upErr } = await supabase.storage.from('ssak-contracts').upload(path, buf, { contentType: mime, upsert: true });
+        if (!upErr) photo_url = supabase.storage.from('ssak-contracts').getPublicUrl(path).data.publicUrl;
+      } catch(e) { console.log('사진 업로드 오류:', e.message); }
+    }
+
+    const { data: existing } = await supabase.from('worker_profiles').select('id,photo_url').eq('anon_id', anon_id).single();
     let result;
     if (existing) {
       const { data, error } = await supabase.from('worker_profiles')
         .update({ nickname, regions, skills, experience: Number(experience)||0, daily_rate: Number(daily_rate)||0,
-          available_days: available_days||[], bio: bio||'', avatar_emoji: avatar_emoji||'🧹',
+          available_days: available_days||[], bio: bio||'', avatar_emoji: avatar_emoji||'👤',
+          ...(photo_url ? { photo_url } : {}),
           updated_at: new Date().toISOString() })
         .eq('anon_id', anon_id).select().single();
       if (error) throw error;
@@ -1201,7 +1216,7 @@ app.post('/api/workers', async (req, res) => {
       const { data, error } = await supabase.from('worker_profiles')
         .insert([{ anon_id, nickname, regions, skills, experience: Number(experience)||0,
           daily_rate: Number(daily_rate)||0, available_days: available_days||[], bio: bio||'',
-          avatar_emoji: avatar_emoji||'🧹', status: 'active' }]).select().single();
+          avatar_emoji: avatar_emoji||'👤', photo_url, status: 'active' }]).select().single();
       if (error) throw error;
       result = data;
     }
