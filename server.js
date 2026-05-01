@@ -1163,7 +1163,6 @@ app.post('/api/push/test', async (req, res) => {
 //  인력매칭 API
 // ═══════════════════════════════════════════════════════════════
 
-// GET /api/workers
 app.get('/api/workers', async (req, res) => {
   try {
     const { region, skill, page = 0, limit = 30 } = req.query;
@@ -1172,8 +1171,9 @@ app.get('/api/workers', async (req, res) => {
       .eq('status', 'active')
       .order('created_at', { ascending: false })
       .range(Number(page)*Number(limit), (Number(page)+1)*Number(limit)-1);
-    if (region && region !== '전체') q = q.contains('regions', [region]);
-    if (skill  && skill  !== '전체') q = q.contains('skills',  [skill]);
+    // Supabase cs (array contains) 필터 - region/skill 파라미터 처리
+    if (region && region !== '전체') q = q.cs('regions', [region]);
+    if (skill  && skill  !== '전체') q = q.cs('skills',  [skill]);
     const { data, error } = await q;
     if (error) throw error;
     res.json({ success: true, data: data || [] });
