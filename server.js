@@ -1183,7 +1183,7 @@ app.get('/api/workers', async (req, res) => {
 // POST /api/workers
 app.post('/api/workers', async (req, res) => {
   try {
-    const { anon_id, nickname, regions, skills, experience, daily_rate, available_days, bio, avatar_emoji, photoBase64, photoMime } = req.body;
+    const { anon_id, nickname, regions, skills, experience, daily_rate, available_days, available_times, bio, avatar_emoji, photoBase64, photoMime } = req.body;
     if (!anon_id || !nickname) return res.status(400).json({ error: '닉네임을 입력해주세요' });
     if (!regions || !regions.length) return res.status(400).json({ error: '활동 지역을 선택해주세요' });
     if (!skills  || !skills.length)  return res.status(400).json({ error: '보유 기술을 선택해주세요' });
@@ -1206,7 +1206,7 @@ app.post('/api/workers', async (req, res) => {
     if (existing) {
       const { data, error } = await supabase.from('worker_profiles')
         .update({ nickname, regions, skills, experience: Number(experience)||0, daily_rate: Number(daily_rate)||0,
-          available_days: available_days||[], bio: bio||'', avatar_emoji: avatar_emoji||'👤',
+          available_days: available_days||[], available_times: available_times||[], bio: bio||'', avatar_emoji: avatar_emoji||'👤',
           ...(photo_url ? { photo_url } : {}),
           updated_at: new Date().toISOString() })
         .eq('anon_id', anon_id).select().single();
@@ -1215,7 +1215,7 @@ app.post('/api/workers', async (req, res) => {
     } else {
       const { data, error } = await supabase.from('worker_profiles')
         .insert([{ anon_id, nickname, regions, skills, experience: Number(experience)||0,
-          daily_rate: Number(daily_rate)||0, available_days: available_days||[], bio: bio||'',
+          daily_rate: Number(daily_rate)||0, available_days: available_days||[], available_times: available_times||[], bio: bio||'',
           avatar_emoji: avatar_emoji||'👤', photo_url, status: 'active' }]).select().single();
       if (error) throw error;
       result = data;
