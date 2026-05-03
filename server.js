@@ -610,7 +610,7 @@ app.get('/api/workers', async (req, res) => {
   try {
     const { region, skill, anon_id } = req.query;
     let q = supabase.from('worker_profiles').select('*').eq('status','active').order('created_at',{ascending:false});
-    if (region) q = q.contains('regions',[region]);
+    if (region) q = q.eq('region', region);
     if (skill)  q = q.contains('skills',[skill]);
     const { data, error } = await q;
     if (error) throw error;
@@ -649,14 +649,24 @@ app.delete('/api/workers/:id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// 인력 프로필 상태 변경 (active/inactive)
+app.patch('/api/workers/:id/status', async (req, res) => {
+  try {
+    const { status } = req.body;
+    const { error } = await supabase.from('worker_profiles').update({ status, updated_at: new Date().toISOString() }).eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success:true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // 채용공고 목록
 app.get('/api/jobs', async (req, res) => {
   try {
     const { region, status, anon_id } = req.query;
-    let q = supabase.from('job_postings').select('*').order('created_at',{ascending:false});
+    let q = supabase.from('job_posts').select('*').order('created_at',{ascending:false});
     if (status) q = q.eq('status', status);
     else q = q.eq('status','open');
-    if (region) q = q.contains('regions',[region]);
+    if (region) q = q.eq('region', region);
     const { data, error } = await q;
     if (error) throw error;
     res.json({ success:true, data: data||[] });
@@ -668,7 +678,7 @@ app.get('/api/jobs/my/posted', async (req, res) => {
   try {
     const { anon_id } = req.query;
     if (!anon_id) return res.status(400).json({ error: 'anon_id 필요' });
-    const { data, error } = await supabase.from('job_postings').select('*').eq('poster_anon_id', anon_id).order('created_at',{ascending:false});
+    const { data, error } = await supabase.from('job_posts').select('*').eq('anon_id', anon_id).order('created_at',{ascending:false});
     if (error) throw error;
     res.json({ success:true, data: data||[] });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -679,7 +689,7 @@ app.get('/api/jobs/my/applied', async (req, res) => {
   try {
     const { anon_id } = req.query;
     if (!anon_id) return res.status(400).json({ error: 'anon_id 필요' });
-    const { data, error } = await supabase.from('job_applications').select('*, job:job_postings(*)').eq('applicant_anon_id', anon_id).order('created_at',{ascending:false});
+    const { data, error } = await supabase.from('job_applications').select('*, job:job_posts(*)').eq('applicant_anon_id', anon_id).order('created_at',{ascending:false});
     if (error) throw error;
     res.json({ success:true, data: data||[] });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -689,8 +699,8 @@ app.get('/api/jobs/my/applied', async (req, res) => {
 app.post('/api/jobs', async (req, res) => {
   try {
     const body = req.body;
-    if (!body.poster_anon_id || !body.title) return res.status(400).json({ error: '필수값 누락' });
-    const { data, error } = await supabase.from('job_postings').insert([{ ...body, status:'open' }]).select().single();
+    if (!body.anon_id || !body.title) return res.status(400).json({ error: '필수값 누락' });
+    const { data, error } = await supabase.from('job_posts').insert([{ ...body, status:'open' }]).select().single();
     if (error) throw error;
     res.json({ success:true, data });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -700,7 +710,7 @@ app.post('/api/jobs', async (req, res) => {
 app.patch('/api/jobs/:id/status', async (req, res) => {
   try {
     const { status } = req.body;
-    const { error } = await supabase.from('job_postings').update({ status }).eq('id', req.params.id);
+    const { error } = await supabase.from('job_posts').update({ status }).eq('id', req.params.id);
     if (error) throw error;
     res.json({ success:true });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -748,8 +758,17 @@ app.get('/api/worker-chats', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// 채팅방 메시지
+// 채팅방 메시지 (기본 경로)
 app.get('/api/worker-chats/:id', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('worker_messages').select('*').eq('chat_id', req.params.id).order('created_at',{ascending:true}).limit(100);
+    if (error) throw error;
+    res.json({ success:true, data: data||[] });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 채팅방 메시지 (messages 서브경로)
+app.get('/api/worker-chats/:id/messages', async (req, res) => {
   try {
     const { data, error } = await supabase.from('worker_messages').select('*').eq('chat_id', req.params.id).order('created_at',{ascending:true}).limit(100);
     if (error) throw error;
@@ -872,8 +891,17 @@ app.get('/api/market/chats', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// 채팅 메시지 조회
+// 채팅 메시지 조회 (기본 경로)
 app.get('/api/market/chats/:id', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('market_messages').select('*').eq('chat_id', req.params.id).order('created_at',{ascending:true}).limit(100);
+    if (error) throw error;
+    res.json({ success:true, data: data||[] });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 채팅 메시지 조회 (messages 서브경로)
+app.get('/api/market/chats/:id/messages', async (req, res) => {
   try {
     const { data, error } = await supabase.from('market_messages').select('*').eq('chat_id', req.params.id).order('created_at',{ascending:true}).limit(100);
     if (error) throw error;
