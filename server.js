@@ -610,7 +610,7 @@ app.get('/api/workers', async (req, res) => {
   try {
     const { region, skill, anon_id } = req.query;
     let q = supabase.from('worker_profiles').select('*').eq('status','active').order('created_at',{ascending:false});
-    if (region) q = q.eq('region', region);
+    if (region) q = q.contains('regions',[region]);
     if (skill)  q = q.contains('skills',[skill]);
     const { data, error } = await q;
     if (error) throw error;
@@ -632,8 +632,43 @@ app.post('/api/workers', async (req, res) => {
   try {
     const body = req.body;
     if (!body.anon_id) return res.status(400).json({ error: 'anon_id 필요' });
+
+    // DB에 저장할 허용 필드만 추출 (unknown 컬럼 에러 방지)
+    const allowed = ['anon_id','nickname','regions','skills','available_days',
+                     'available_times','experience','daily_rate','bio',
+                     'contact','avatar_emoji','status','photo_url'];
+    const profileData = {};
+    for (const k of allowed) {
+      if (body[k] !== undefined) profileData[k] = body[k];
+    }
+
+    // 사진 처리: base64 → Supabase Storage 업로드
+    if (body.photoBase64) {
+      try {
+        const imgBuffer = Buffer.from(body.photoBase64, 'base64');
+        const mime = body.photoMime || 'image/jpeg';
+        const ext  = mime.split('/')[1] || 'jpg';
+        const fileName = `workers/${body.anon_id}_${Date.now()}.${ext}`;
+        const { error: upErr } = await supabase.storage
+          .from('ssak-contracts')
+          .upload(fileName, imgBuffer, { contentType: mime, upsert: true });
+        if (!upErr) {
+          const { data: urlData } = supabase.storage
+            .from('ssak-contracts')
+            .getPublicUrl(fileName);
+          profileData.photo_url = urlData.publicUrl;
+        } else {
+          console.error('사진 업로드 오류:', upErr.message);
+        }
+      } catch(photoErr) {
+        console.error('사진 처리 오류:', photoErr.message);
+      }
+    }
+
+    profileData.updated_at = new Date().toISOString();
+
     const { data, error } = await supabase.from('worker_profiles')
-      .upsert({ ...body, updated_at: new Date().toISOString() }, { onConflict: 'anon_id' })
+      .upsert(profileData, { onConflict: 'anon_id' })
       .select().single();
     if (error) throw error;
     res.json({ success:true, data });
@@ -649,33 +684,14 @@ app.delete('/api/workers/:id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// 인력 프로필 상태 변경 (active/inactive)
-app.patch('/api/workers/:id/status', async (req, res) => {
-  try {
-    const { status } = req.body;
-    const { error } = await supabase.from('worker_profiles').update({ status, updated_at: new Date().toISOString() }).eq('id', req.params.id);
-    if (error) throw error;
-    res.json({ success:true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// 채용공고 단일 조회
-app.get('/api/jobs/:id', async (req, res) => {
-  try {
-    const { data, error } = await supabase.from('job_posts').select('*').eq('id', req.params.id).single();
-    if (error) throw error;
-    res.json({ success:true, data });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
 // 채용공고 목록
 app.get('/api/jobs', async (req, res) => {
   try {
     const { region, status, anon_id } = req.query;
-    let q = supabase.from('job_posts').select('*').order('created_at',{ascending:false});
+    let q = supabase.from('job_postings').select('*').order('created_at',{ascending:false});
     if (status) q = q.eq('status', status);
     else q = q.eq('status','open');
-    if (region) q = q.eq('region', region);
+    if (region) q = q.contains('regions',[region]);
     const { data, error } = await q;
     if (error) throw error;
     res.json({ success:true, data: data||[] });
@@ -687,7 +703,7 @@ app.get('/api/jobs/my/posted', async (req, res) => {
   try {
     const { anon_id } = req.query;
     if (!anon_id) return res.status(400).json({ error: 'anon_id 필요' });
-    const { data, error } = await supabase.from('job_posts').select('*').eq('anon_id', anon_id).order('created_at',{ascending:false});
+    const { data, error } = await supabase.from('job_postings').select('*').eq('poster_anon_id', anon_id).order('created_at',{ascending:false});
     if (error) throw error;
     res.json({ success:true, data: data||[] });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -698,7 +714,7 @@ app.get('/api/jobs/my/applied', async (req, res) => {
   try {
     const { anon_id } = req.query;
     if (!anon_id) return res.status(400).json({ error: 'anon_id 필요' });
-    const { data, error } = await supabase.from('job_applications').select('*, job:job_posts(*)').eq('applicant_anon_id', anon_id).order('created_at',{ascending:false});
+    const { data, error } = await supabase.from('job_applications').select('*, job:job_postings(*)').eq('applicant_anon_id', anon_id).order('created_at',{ascending:false});
     if (error) throw error;
     res.json({ success:true, data: data||[] });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -708,8 +724,8 @@ app.get('/api/jobs/my/applied', async (req, res) => {
 app.post('/api/jobs', async (req, res) => {
   try {
     const body = req.body;
-    if (!body.anon_id || !body.title) return res.status(400).json({ error: '필수값 누락' });
-    const { data, error } = await supabase.from('job_posts').insert([{ ...body, status:'open' }]).select().single();
+    if (!body.poster_anon_id || !body.title) return res.status(400).json({ error: '필수값 누락' });
+    const { data, error } = await supabase.from('job_postings').insert([{ ...body, status:'open' }]).select().single();
     if (error) throw error;
     res.json({ success:true, data });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -719,7 +735,7 @@ app.post('/api/jobs', async (req, res) => {
 app.patch('/api/jobs/:id/status', async (req, res) => {
   try {
     const { status } = req.body;
-    const { error } = await supabase.from('job_posts').update({ status }).eq('id', req.params.id);
+    const { error } = await supabase.from('job_postings').update({ status }).eq('id', req.params.id);
     if (error) throw error;
     res.json({ success:true });
   } catch(e) { res.status(500).json({ error: e.message }); }
@@ -767,17 +783,8 @@ app.get('/api/worker-chats', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// 채팅방 메시지 (기본 경로)
+// 채팅방 메시지
 app.get('/api/worker-chats/:id', async (req, res) => {
-  try {
-    const { data, error } = await supabase.from('worker_messages').select('*').eq('chat_id', req.params.id).order('created_at',{ascending:true}).limit(100);
-    if (error) throw error;
-    res.json({ success:true, data: data||[] });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// 채팅방 메시지 (messages 서브경로)
-app.get('/api/worker-chats/:id/messages', async (req, res) => {
   try {
     const { data, error } = await supabase.from('worker_messages').select('*').eq('chat_id', req.params.id).order('created_at',{ascending:true}).limit(100);
     if (error) throw error;
@@ -806,19 +813,8 @@ app.post('/api/worker-chats', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// 메시지 전송 (기본 경로)
+// 메시지 전송
 app.post('/api/worker-chats/:id', async (req, res) => {
-  try {
-    const { sender_anon_id, content } = req.body;
-    const { data, error } = await supabase.from('worker_messages').insert([{ chat_id: req.params.id, sender_anon_id, content }]).select().single();
-    if (error) throw error;
-    await supabase.from('worker_chats').update({ last_message: content, updated_at: new Date().toISOString() }).eq('id', req.params.id);
-    res.json({ success:true, data });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// 메시지 전송 (messages 서브경로)
-app.post('/api/worker-chats/:id/messages', async (req, res) => {
   try {
     const { sender_anon_id, content } = req.body;
     const { data, error } = await supabase.from('worker_messages').insert([{ chat_id: req.params.id, sender_anon_id, content }]).select().single();
@@ -911,17 +907,8 @@ app.get('/api/market/chats', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// 채팅 메시지 조회 (기본 경로)
+// 채팅 메시지 조회
 app.get('/api/market/chats/:id', async (req, res) => {
-  try {
-    const { data, error } = await supabase.from('market_messages').select('*').eq('chat_id', req.params.id).order('created_at',{ascending:true}).limit(100);
-    if (error) throw error;
-    res.json({ success:true, data: data||[] });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// 채팅 메시지 조회 (messages 서브경로)
-app.get('/api/market/chats/:id/messages', async (req, res) => {
   try {
     const { data, error } = await supabase.from('market_messages').select('*').eq('chat_id', req.params.id).order('created_at',{ascending:true}).limit(100);
     if (error) throw error;
@@ -950,7 +937,7 @@ app.post('/api/market/chats', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// 메시지 전송 (기본 경로)
+// 메시지 전송
 app.post('/api/market/chats/:id', async (req, res) => {
   try {
     const { sender_anon_id, content } = req.body;
@@ -958,197 +945,5 @@ app.post('/api/market/chats/:id', async (req, res) => {
     if (error) throw error;
     await supabase.from('market_chats').update({ last_message: content, updated_at: new Date().toISOString() }).eq('id', req.params.id);
     res.json({ success:true, data });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// 메시지 전송 (messages 서브경로)
-app.post('/api/market/chats/:id/messages', async (req, res) => {
-  try {
-    const { sender_anon_id, content } = req.body;
-    const { data, error } = await supabase.from('market_messages').insert([{ chat_id: req.params.id, sender_anon_id, content }]).select().single();
-    if (error) throw error;
-    await supabase.from('market_chats').update({ last_message: content, updated_at: new Date().toISOString() }).eq('id', req.params.id);
-    res.json({ success:true, data });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// ═══════════════════════════════════════════════════════════════
-// 💬 커뮤니티 API
-// ═══════════════════════════════════════════════════════════════
-
-
-// 익명 닉네임 생성 헬퍼
-function makeNick(anon_id) {
-  const emojis = ['🧹','🪣','✨','🫧','🧽','🪥','🧴','🫙'];
-  const idx = Math.abs(anon_id.split('').reduce((a,c)=>a+c.charCodeAt(0),0)) % emojis.length;
-  return emojis[idx] + ' 익명' + anon_id.slice(-4).toUpperCase();
-}
-
-// 게시글 목록 (무한스크롤 + 검색 + 카테고리)
-app.get('/api/community/posts', async (req, res) => {
-  try {
-    const page  = parseInt(req.query.page)  || 0;
-    const limit = parseInt(req.query.limit) || 20;
-    const { search, category } = req.query;
-
-    let q = supabase.from('community_posts')
-      .select('*', { count: 'exact' })
-      .eq('deleted', false)
-      .order('created_at', { ascending: false })
-      .range(page * limit, (page + 1) * limit - 1);
-
-    if (category && category !== '전체') q = q.eq('category', category);
-    if (search) q = q.ilike('content', `%${search}%`);
-
-    const { data, error, count } = await q;
-    if (error) throw error;
-    const enriched = (data || []).map(p => ({ ...p, nickname: makeNick(p.anon_id) }));
-    res.json({ success: true, data: enriched, total: count || 0, hasMore: (page + 1) * limit < (count || 0) });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// 게시글 단일 조회 (댓글 + 좋아요 여부 포함)
-app.get('/api/community/posts/:id', async (req, res) => {
-  try {
-    const { anon_id } = req.query;
-    const { data: post, error } = await supabase.from('community_posts')
-      .select('*').eq('id', req.params.id).single();
-    if (error) throw error;
-
-    // 댓글 함께 조회
-    const { data: comments } = await supabase.from('community_comments')
-      .select('*').eq('post_id', req.params.id).eq('deleted', false)
-      .order('created_at', { ascending: true });
-
-    // 좋아요 여부
-    let liked = false;
-    if (anon_id) {
-      const { data: like } = await supabase.from('community_likes')
-        .select('id').eq('post_id', req.params.id).eq('anon_id', anon_id).maybeSingle();
-      liked = !!like;
-    }
-
-    // 내 게시글 여부
-    const is_mine = anon_id && post.anon_id === anon_id;
-
-    const postWithNick = { ...post, liked, is_mine, nickname: makeNick(post.anon_id) };
-    const cmtsWithNick = (comments || []).map(c => ({ ...c, nickname: makeNick(c.anon_id), is_mine: anon_id && c.anon_id === anon_id }));
-    res.json({ success: true, data: postWithNick, comments: cmtsWithNick });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// 게시글 작성
-app.post('/api/community/posts', async (req, res) => {
-  try {
-    const { anon_id, title, content, category, imageBase64 } = req.body;
-    if (!anon_id || !content) return res.status(400).json({ error: '필수값 누락' });
-
-    let image_url = null;
-
-    // 이미지 업로드 (base64 → Supabase Storage)
-    if (imageBase64) {
-      try {
-        const buf = Buffer.from(imageBase64, 'base64');
-        const fname = `community/${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`;
-        const { data: upData, error: upErr } = await supabase.storage
-          .from('ssak-contracts').upload(fname, buf, { contentType: 'image/jpeg', upsert: false });
-        if (!upErr) {
-          const { data: urlData } = supabase.storage.from('ssak-contracts').getPublicUrl(fname);
-          image_url = urlData.publicUrl;
-        }
-      } catch(imgErr) { console.warn('이미지 업로드 실패:', imgErr.message); }
-    }
-
-    const { data, error } = await supabase.from('community_posts')
-      .insert([{ anon_id, title: title || '', content, category: category || '일반', image_url }])
-      .select().single();
-    if (error) throw error;
-    res.json({ success: true, data });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// 게시글 삭제 (soft delete)
-app.delete('/api/community/posts/:id', async (req, res) => {
-  try {
-    const { anon_id } = req.body;
-    const { error } = await supabase.from('community_posts')
-      .update({ deleted: true }).eq('id', req.params.id).eq('anon_id', anon_id);
-    if (error) throw error;
-    res.json({ success: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// 좋아요 토글
-app.post('/api/community/posts/:id/like', async (req, res) => {
-  try {
-    const { anon_id } = req.body;
-    const postId = req.params.id;
-    if (!anon_id) return res.status(400).json({ error: 'anon_id 필요' });
-
-    // 이미 좋아요 눌렀는지 확인
-    const { data: existing } = await supabase.from('community_likes')
-      .select('id').eq('post_id', postId).eq('anon_id', anon_id).maybeSingle();
-
-    let liked;
-    if (existing) {
-      await supabase.from('community_likes').delete().eq('id', existing.id);
-      await supabase.from('community_posts').update({ like_count: supabase.rpc ? undefined : undefined }).eq('id', postId);
-      // like_count 감소
-      const { data: post } = await supabase.from('community_posts').select('like_count').eq('id', postId).single();
-      await supabase.from('community_posts').update({ like_count: Math.max(0, (post?.like_count || 1) - 1) }).eq('id', postId);
-      liked = false;
-    } else {
-      await supabase.from('community_likes').insert([{ post_id: postId, anon_id }]);
-      const { data: post } = await supabase.from('community_posts').select('like_count').eq('id', postId).single();
-      await supabase.from('community_posts').update({ like_count: (post?.like_count || 0) + 1 }).eq('id', postId);
-      liked = true;
-    }
-    res.json({ success: true, liked });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// 댓글 목록
-app.get('/api/community/comments/:postId', async (req, res) => {
-  try {
-    const { data, error } = await supabase.from('community_comments')
-      .select('*').eq('post_id', req.params.postId).eq('deleted', false)
-      .order('created_at', { ascending: true });
-    if (error) throw error;
-    res.json({ success: true, data: data || [] });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// 댓글 작성
-app.post('/api/community/comments/:postId', async (req, res) => {
-  try {
-    const { anon_id, content } = req.body;
-    if (!anon_id || !content) return res.status(400).json({ error: '필수값 누락' });
-
-    const { data, error } = await supabase.from('community_comments')
-      .insert([{ post_id: req.params.postId, anon_id, content }]).select().single();
-    if (error) throw error;
-
-    // comment_count 증가
-    const { data: post } = await supabase.from('community_posts').select('comment_count').eq('id', req.params.postId).single();
-    await supabase.from('community_posts').update({ comment_count: (post?.comment_count || 0) + 1 }).eq('id', req.params.postId);
-
-    res.json({ success: true, data });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// 댓글 삭제
-app.delete('/api/community/comments/:id', async (req, res) => {
-  try {
-    const { anon_id, post_id } = req.body;
-    const { error } = await supabase.from('community_comments')
-      .update({ deleted: true }).eq('id', req.params.id).eq('anon_id', anon_id);
-    if (error) throw error;
-
-    // comment_count 감소
-    if (post_id) {
-      const { data: post } = await supabase.from('community_posts').select('comment_count').eq('id', post_id).single();
-      await supabase.from('community_posts').update({ comment_count: Math.max(0, (post?.comment_count || 1) - 1) }).eq('id', post_id);
-    }
-    res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
