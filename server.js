@@ -659,6 +659,15 @@ app.patch('/api/workers/:id/status', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// 채용공고 단일 조회
+app.get('/api/jobs/:id', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('job_posts').select('*').eq('id', req.params.id).single();
+    if (error) throw error;
+    res.json({ success:true, data });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
 // 채용공고 목록
 app.get('/api/jobs', async (req, res) => {
   try {
@@ -797,8 +806,19 @@ app.post('/api/worker-chats', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// 메시지 전송
+// 메시지 전송 (기본 경로)
 app.post('/api/worker-chats/:id', async (req, res) => {
+  try {
+    const { sender_anon_id, content } = req.body;
+    const { data, error } = await supabase.from('worker_messages').insert([{ chat_id: req.params.id, sender_anon_id, content }]).select().single();
+    if (error) throw error;
+    await supabase.from('worker_chats').update({ last_message: content, updated_at: new Date().toISOString() }).eq('id', req.params.id);
+    res.json({ success:true, data });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 메시지 전송 (messages 서브경로)
+app.post('/api/worker-chats/:id/messages', async (req, res) => {
   try {
     const { sender_anon_id, content } = req.body;
     const { data, error } = await supabase.from('worker_messages').insert([{ chat_id: req.params.id, sender_anon_id, content }]).select().single();
@@ -930,8 +950,19 @@ app.post('/api/market/chats', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// 메시지 전송
+// 메시지 전송 (기본 경로)
 app.post('/api/market/chats/:id', async (req, res) => {
+  try {
+    const { sender_anon_id, content } = req.body;
+    const { data, error } = await supabase.from('market_messages').insert([{ chat_id: req.params.id, sender_anon_id, content }]).select().single();
+    if (error) throw error;
+    await supabase.from('market_chats').update({ last_message: content, updated_at: new Date().toISOString() }).eq('id', req.params.id);
+    res.json({ success:true, data });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 메시지 전송 (messages 서브경로)
+app.post('/api/market/chats/:id/messages', async (req, res) => {
   try {
     const { sender_anon_id, content } = req.body;
     const { data, error } = await supabase.from('market_messages').insert([{ chat_id: req.params.id, sender_anon_id, content }]).select().single();
