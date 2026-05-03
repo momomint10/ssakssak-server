@@ -600,3 +600,315 @@ app.listen(PORT, () => {
   console.log(`✅ 싹싹 서버 실행 중 - 포트 ${PORT}`);
   console.log(`🧹 싹싹 입주청소 전문인 플랫폼`);
 });
+
+// ═══════════════════════════════════════════════════════════════
+// 👥 인력 매칭 API
+// ═══════════════════════════════════════════════════════════════
+
+// 인력 목록 조회
+app.get('/api/workers', async (req, res) => {
+  try {
+    const { region, skill, anon_id } = req.query;
+    let q = supabase.from('worker_profiles').select('*').eq('status','active').order('created_at',{ascending:false});
+    if (region) q = q.contains('regions',[region]);
+    if (skill)  q = q.contains('skills',[skill]);
+    const { data, error } = await q;
+    if (error) throw error;
+    res.json({ success:true, data: data||[] });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 내 프로필 조회
+app.get('/api/workers/my/:anon_id', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('worker_profiles').select('*').eq('anon_id', req.params.anon_id).maybeSingle();
+    if (error) throw error;
+    res.json({ success:true, data: data||null });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 프로필 등록/수정 (upsert)
+app.post('/api/workers', async (req, res) => {
+  try {
+    const body = req.body;
+    if (!body.anon_id) return res.status(400).json({ error: 'anon_id 필요' });
+    const { data, error } = await supabase.from('worker_profiles')
+      .upsert({ ...body, updated_at: new Date().toISOString() }, { onConflict: 'anon_id' })
+      .select().single();
+    if (error) throw error;
+    res.json({ success:true, data });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 프로필 삭제
+app.delete('/api/workers/:id', async (req, res) => {
+  try {
+    const { error } = await supabase.from('worker_profiles').update({ status:'deleted' }).eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success:true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 채용공고 목록
+app.get('/api/jobs', async (req, res) => {
+  try {
+    const { region, status, anon_id } = req.query;
+    let q = supabase.from('job_postings').select('*').order('created_at',{ascending:false});
+    if (status) q = q.eq('status', status);
+    else q = q.eq('status','open');
+    if (region) q = q.contains('regions',[region]);
+    const { data, error } = await q;
+    if (error) throw error;
+    res.json({ success:true, data: data||[] });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 내가 올린 채용공고
+app.get('/api/jobs/my/posted', async (req, res) => {
+  try {
+    const { anon_id } = req.query;
+    if (!anon_id) return res.status(400).json({ error: 'anon_id 필요' });
+    const { data, error } = await supabase.from('job_postings').select('*').eq('poster_anon_id', anon_id).order('created_at',{ascending:false});
+    if (error) throw error;
+    res.json({ success:true, data: data||[] });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 내가 지원한 채용공고
+app.get('/api/jobs/my/applied', async (req, res) => {
+  try {
+    const { anon_id } = req.query;
+    if (!anon_id) return res.status(400).json({ error: 'anon_id 필요' });
+    const { data, error } = await supabase.from('job_applications').select('*, job:job_postings(*)').eq('applicant_anon_id', anon_id).order('created_at',{ascending:false});
+    if (error) throw error;
+    res.json({ success:true, data: data||[] });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 채용공고 등록
+app.post('/api/jobs', async (req, res) => {
+  try {
+    const body = req.body;
+    if (!body.poster_anon_id || !body.title) return res.status(400).json({ error: '필수값 누락' });
+    const { data, error } = await supabase.from('job_postings').insert([{ ...body, status:'open' }]).select().single();
+    if (error) throw error;
+    res.json({ success:true, data });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 채용공고 상태 변경
+app.patch('/api/jobs/:id/status', async (req, res) => {
+  try {
+    const { status } = req.body;
+    const { error } = await supabase.from('job_postings').update({ status }).eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success:true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 지원하기
+app.post('/api/jobs/:id/apply', async (req, res) => {
+  try {
+    const { applicant_anon_id, message } = req.body;
+    if (!applicant_anon_id) return res.status(400).json({ error: 'anon_id 필요' });
+    const { data, error } = await supabase.from('job_applications')
+      .upsert([{ job_id: req.params.id, applicant_anon_id, message: message||'', status:'pending' }], { onConflict: 'job_id,applicant_anon_id' })
+      .select().single();
+    if (error) throw error;
+    res.json({ success:true, data });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 지원자 목록
+app.get('/api/jobs/:id/applications', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('job_applications').select('*').eq('job_id', req.params.id).order('created_at',{ascending:false});
+    if (error) throw error;
+    res.json({ success:true, data: data||[] });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 매칭 확정
+app.patch('/api/jobs/applications/:id/match', async (req, res) => {
+  try {
+    const { error } = await supabase.from('job_applications').update({ status:'matched' }).eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success:true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 인력 채팅방 목록
+app.get('/api/worker-chats', async (req, res) => {
+  try {
+    const { anon_id } = req.query;
+    if (!anon_id) return res.status(400).json({ error: 'anon_id 필요' });
+    const { data, error } = await supabase.from('worker_chats').select('*, worker:worker_profiles(nickname,avatar_emoji)').or(`worker_anon_id.eq.${anon_id},requester_anon_id.eq.${anon_id}`).order('updated_at',{ascending:false});
+    if (error) throw error;
+    res.json({ success:true, data: data||[] });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 채팅방 메시지
+app.get('/api/worker-chats/:id', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('worker_messages').select('*').eq('chat_id', req.params.id).order('created_at',{ascending:true}).limit(100);
+    if (error) throw error;
+    res.json({ success:true, data: data||[] });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 채팅 시작/메시지 전송
+app.post('/api/worker-chats', async (req, res) => {
+  try {
+    const { worker_id, worker_anon_id, requester_anon_id, content } = req.body;
+    let chat;
+    const { data: existing } = await supabase.from('worker_chats').select('id').eq('worker_id', worker_id).eq('requester_anon_id', requester_anon_id).maybeSingle();
+    if (existing) {
+      chat = existing;
+    } else {
+      const { data: newChat, error } = await supabase.from('worker_chats').insert([{ worker_id, worker_anon_id, requester_anon_id }]).select().single();
+      if (error) throw error;
+      chat = newChat;
+    }
+    if (content) {
+      await supabase.from('worker_messages').insert([{ chat_id: chat.id, sender_anon_id: requester_anon_id, content }]);
+      await supabase.from('worker_chats').update({ last_message: content, updated_at: new Date().toISOString(), worker_unread: supabase.rpc ? 1 : 1 }).eq('id', chat.id);
+    }
+    res.json({ success:true, data: chat });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 메시지 전송
+app.post('/api/worker-chats/:id', async (req, res) => {
+  try {
+    const { sender_anon_id, content } = req.body;
+    const { data, error } = await supabase.from('worker_messages').insert([{ chat_id: req.params.id, sender_anon_id, content }]).select().single();
+    if (error) throw error;
+    await supabase.from('worker_chats').update({ last_message: content, updated_at: new Date().toISOString() }).eq('id', req.params.id);
+    res.json({ success:true, data });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// 🛒 중고거래 API
+// ═══════════════════════════════════════════════════════════════
+
+// 목록 조회 (무한스크롤 + 검색 + 카테고리)
+app.get('/api/market/listings', async (req, res) => {
+  try {
+    const page = parseInt(req.query.page)||0;
+    const limit = parseInt(req.query.limit)||20;
+    const { search, category } = req.query;
+    let q = supabase.from('market_listings').select('*', { count:'exact' })
+      .neq('status','deleted').order('created_at',{ascending:false})
+      .range(page*limit, (page+1)*limit-1);
+    if (category && category !== '전체') q = q.eq('category', category);
+    if (search) q = q.ilike('title', `%${search}%`);
+    const { data, error, count } = await q;
+    if (error) throw error;
+    res.json({ success:true, data: data||[], total: count||0, hasMore: (page+1)*limit < (count||0) });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 내 목록
+app.get('/api/market/listings/mine', async (req, res) => {
+  try {
+    const { anon_id } = req.query;
+    const { data, error } = await supabase.from('market_listings').select('*').eq('anon_id', anon_id).neq('status','deleted').order('created_at',{ascending:false});
+    if (error) throw error;
+    res.json({ success:true, data: data||[] });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 상세 조회 + 조회수 증가
+app.get('/api/market/listings/:id', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('market_listings').select('*').eq('id', req.params.id).single();
+    if (error) throw error;
+    supabase.from('market_listings').update({ views: (data.views||0)+1 }).eq('id', req.params.id).then(() => {});
+    res.json({ success:true, data });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 등록
+app.post('/api/market/listings', async (req, res) => {
+  try {
+    const body = req.body;
+    if (!body.anon_id || !body.title || body.price === undefined) return res.status(400).json({ error: '필수값 누락' });
+    const { data, error } = await supabase.from('market_listings').insert([{ ...body, status:'available', views:0 }]).select().single();
+    if (error) throw error;
+    res.json({ success:true, data });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 상태 변경 (available/reserved/sold)
+app.patch('/api/market/listings/:id/status', async (req, res) => {
+  try {
+    const { status, anon_id } = req.body;
+    const { error } = await supabase.from('market_listings').update({ status }).eq('id', req.params.id).eq('anon_id', anon_id);
+    if (error) throw error;
+    res.json({ success:true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 삭제
+app.delete('/api/market/listings/:id', async (req, res) => {
+  try {
+    const { anon_id } = req.body;
+    const { error } = await supabase.from('market_listings').update({ status:'deleted' }).eq('id', req.params.id).eq('anon_id', anon_id);
+    if (error) throw error;
+    res.json({ success:true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 채팅방 목록
+app.get('/api/market/chats', async (req, res) => {
+  try {
+    const { anon_id } = req.query;
+    if (!anon_id) return res.status(400).json({ error: 'anon_id 필요' });
+    const { data, error } = await supabase.from('market_chats').select('*, listing:market_listings(title,image_url,price)').or(`buyer_anon_id.eq.${anon_id},seller_anon_id.eq.${anon_id}`).order('updated_at',{ascending:false});
+    if (error) throw error;
+    res.json({ success:true, data: data||[] });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 채팅 메시지 조회
+app.get('/api/market/chats/:id', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('market_messages').select('*').eq('chat_id', req.params.id).order('created_at',{ascending:true}).limit(100);
+    if (error) throw error;
+    res.json({ success:true, data: data||[] });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 채팅 시작/메시지 전송
+app.post('/api/market/chats', async (req, res) => {
+  try {
+    const { listing_id, buyer_anon_id, seller_anon_id, content } = req.body;
+    let chat;
+    const { data: existing } = await supabase.from('market_chats').select('id').eq('listing_id', listing_id).eq('buyer_anon_id', buyer_anon_id).maybeSingle();
+    if (existing) {
+      chat = existing;
+    } else {
+      const { data: newChat, error } = await supabase.from('market_chats').insert([{ listing_id, buyer_anon_id, seller_anon_id }]).select().single();
+      if (error) throw error;
+      chat = newChat;
+    }
+    if (content) {
+      await supabase.from('market_messages').insert([{ chat_id: chat.id, sender_anon_id: buyer_anon_id, content }]);
+      await supabase.from('market_chats').update({ last_message: content, updated_at: new Date().toISOString() }).eq('id', chat.id);
+    }
+    res.json({ success:true, data: chat });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// 메시지 전송
+app.post('/api/market/chats/:id', async (req, res) => {
+  try {
+    const { sender_anon_id, content } = req.body;
+    const { data, error } = await supabase.from('market_messages').insert([{ chat_id: req.params.id, sender_anon_id, content }]).select().single();
+    if (error) throw error;
+    await supabase.from('market_chats').update({ last_message: content, updated_at: new Date().toISOString() }).eq('id', req.params.id);
+    res.json({ success:true, data });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
