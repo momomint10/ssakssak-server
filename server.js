@@ -976,6 +976,14 @@ app.post('/api/market/chats/:id/messages', async (req, res) => {
 // 💬 커뮤니티 API
 // ═══════════════════════════════════════════════════════════════
 
+
+// 익명 닉네임 생성 헬퍼
+function makeNick(anon_id) {
+  const emojis = ['🧹','🪣','✨','🫧','🧽','🪥','🧴','🫙'];
+  const idx = Math.abs(anon_id.split('').reduce((a,c)=>a+c.charCodeAt(0),0)) % emojis.length;
+  return emojis[idx] + ' 익명' + anon_id.slice(-4).toUpperCase();
+}
+
 // 게시글 목록 (무한스크롤 + 검색 + 카테고리)
 app.get('/api/community/posts', async (req, res) => {
   try {
@@ -994,17 +1002,38 @@ app.get('/api/community/posts', async (req, res) => {
 
     const { data, error, count } = await q;
     if (error) throw error;
-    res.json({ success: true, data: data || [], total: count || 0, hasMore: (page + 1) * limit < (count || 0) });
+    const enriched = (data || []).map(p => ({ ...p, nickname: makeNick(p.anon_id) }));
+    res.json({ success: true, data: enriched, total: count || 0, hasMore: (page + 1) * limit < (count || 0) });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// 게시글 단일 조회
+// 게시글 단일 조회 (댓글 + 좋아요 여부 포함)
 app.get('/api/community/posts/:id', async (req, res) => {
   try {
-    const { data, error } = await supabase.from('community_posts')
+    const { anon_id } = req.query;
+    const { data: post, error } = await supabase.from('community_posts')
       .select('*').eq('id', req.params.id).single();
     if (error) throw error;
-    res.json({ success: true, data });
+
+    // 댓글 함께 조회
+    const { data: comments } = await supabase.from('community_comments')
+      .select('*').eq('post_id', req.params.id).eq('deleted', false)
+      .order('created_at', { ascending: true });
+
+    // 좋아요 여부
+    let liked = false;
+    if (anon_id) {
+      const { data: like } = await supabase.from('community_likes')
+        .select('id').eq('post_id', req.params.id).eq('anon_id', anon_id).maybeSingle();
+      liked = !!like;
+    }
+
+    // 내 게시글 여부
+    const is_mine = anon_id && post.anon_id === anon_id;
+
+    const postWithNick = { ...post, liked, is_mine, nickname: makeNick(post.anon_id) };
+    const cmtsWithNick = (comments || []).map(c => ({ ...c, nickname: makeNick(c.anon_id), is_mine: anon_id && c.anon_id === anon_id }));
+    res.json({ success: true, data: postWithNick, comments: cmtsWithNick });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
