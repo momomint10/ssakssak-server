@@ -62,6 +62,7 @@ app.use('/api/jobs', writeLimiter);
 app.use('/api/market/listings', writeLimiter);
 app.use('/api/market/chats', writeLimiter);
 app.use('/api/worker-chats', writeLimiter);
+app.use('/api/community', writeLimiter);        // 커뮤니티 글·댓글·좋아요 spam 방어
 
 // Supabase 연결
 const supabase = createClient(
@@ -655,6 +656,285 @@ app.delete('/api/schedules/:id', async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error('schedules DELETE error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// 커뮤니티 (community)
+// ══════════════════════════════════════════════════════════════════════
+
+// 닉네임 헬퍼: anon_id로부터 결정적 닉네임 생성 (같은 anon_id는 항상 같은 닉네임)
+function nicknameOf(anonId) {
+  if (!anonId) return '익명';
+  // anon_id의 마지막 4자를 base36 숫자로 사용 (0001~9999 범위로 매핑)
+  const tail = String(anonId).slice(-4).toLowerCase();
+  let n = 0;
+  for (const ch of tail) n = (n * 36 + parseInt(ch, 36) || 0) | 0;
+  const num = (Math.abs(n) % 9000 + 1000); // 1000~9999
+  return '익명' + num;
+}
+
+// 입력 검증 헬퍼
+function validateAnonId(v) { return typeof v === 'string' && v.length >= 4 && v.length <= 100 && /^[a-zA-Z0-9_-]+$/.test(v); }
+function clampStr(v, max) { return (typeof v === 'string' ? v : '').slice(0, max); }
+
+// 1) 피드 조회 (페이지네이션 + 검색)
+app.get('/api/community/posts', async (req, res) => {
+  try {
+    const page = Math.max(0, parseInt(req.query.page) || 0);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
+    const search = clampStr(req.query.search || '', 100).trim();
+
+    let q = supabase.from('community_posts')
+      .select('id, anon_id, title, content, image_url, like_count, comment_count, created_at')
+      .eq('deleted', false)
+      .order('created_at', { ascending: false })
+      .range(page * limit, (page + 1) * limit - 1);
+
+    if (search) {
+      // ILIKE on title or content. Supabase의 .or() 사용
+      const pat = `%${search.replace(/[%_\\]/g, '\\$&')}%`;
+      q = q.or(`title.ilike.${pat},content.ilike.${pat}`);
+    }
+
+    const { data, error } = await q;
+    if (error) throw error;
+
+    const enriched = (data || []).map(p => ({
+      ...p,
+      nickname: nicknameOf(p.anon_id)
+    }));
+    res.json({ success: true, data: enriched });
+  } catch (err) {
+    console.error('community posts GET error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 2) 피드 글 작성 (이미지 base64 업로드 지원)
+app.post('/api/community/posts', async (req, res) => {
+  try {
+    const { anon_id, title, content, imageBase64, imageMime } = req.body || {};
+    if (!validateAnonId(anon_id)) return res.status(400).json({ success: false, error: 'anon_id 필수' });
+    const t = clampStr(title || '', 100).trim();
+    const c = clampStr(content || '', 2000).trim();
+    if (!c) return res.status(400).json({ success: false, error: '내용은 필수' });
+
+    let image_url = null;
+    if (imageBase64 && typeof imageBase64 === 'string') {
+      // 이미지 업로드 → Storage (ssak-contracts 버킷의 community/ 폴더)
+      try {
+        // base64 사이즈 제한 (10MB)
+        if (imageBase64.length > 14 * 1024 * 1024) {
+          return res.status(400).json({ success: false, error: '이미지가 너무 큽니다 (10MB 이하)' });
+        }
+        const mime = (typeof imageMime === 'string' && /^image\/(png|jpe?g|webp|gif)$/.test(imageMime)) ? imageMime : 'image/jpeg';
+        const ext = mime.split('/')[1].replace('jpeg', 'jpg');
+        const buf = Buffer.from(imageBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64');
+        const filename = `community/${Date.now()}-${Math.random().toString(36).slice(2,9)}.${ext}`;
+        const { error: upErr } = await supabase.storage.from('ssak-contracts').upload(filename, buf, { contentType: mime, upsert: false });
+        if (upErr) throw upErr;
+        const { data: pub } = supabase.storage.from('ssak-contracts').getPublicUrl(filename);
+        image_url = pub.publicUrl;
+      } catch (e) {
+        console.error('이미지 업로드 실패:', e.message);
+        // 이미지 실패해도 글은 등록 (image_url=null)
+      }
+    }
+
+    const { data, error } = await supabase.from('community_posts').insert([{
+      anon_id, title: t || null, content: c, image_url, category: '일반'
+    }]).select().single();
+    if (error) throw error;
+
+    res.json({ success: true, data: { ...data, nickname: nicknameOf(anon_id) } });
+  } catch (err) {
+    console.error('community posts POST error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 3) 글 상세 + 댓글 + 내가 좋아요 했는지
+app.get('/api/community/posts/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const anon_id = String(req.query.anon_id || '');
+
+    const { data: post, error: pErr } = await supabase.from('community_posts')
+      .select('id, anon_id, title, content, image_url, like_count, comment_count, created_at, deleted')
+      .eq('id', id).single();
+    if (pErr) throw pErr;
+    if (!post || post.deleted) return res.status(404).json({ success: false, error: '글을 찾을 수 없습니다' });
+
+    const { data: comments, error: cErr } = await supabase.from('community_comments')
+      .select('id, anon_id, content, created_at')
+      .eq('post_id', id).eq('deleted', false)
+      .order('created_at', { ascending: true });
+    if (cErr) throw cErr;
+
+    // 내가 좋아요했는지
+    let liked = false;
+    if (anon_id) {
+      const { data: lk } = await supabase.from('community_likes')
+        .select('id').eq('post_id', id).eq('anon_id', anon_id).maybeSingle();
+      liked = !!lk;
+    }
+
+    const enrichedComments = (comments || []).map(c => ({
+      id: c.id,
+      content: c.content,
+      created_at: c.created_at,
+      nickname: nicknameOf(c.anon_id),
+      is_mine: anon_id && c.anon_id === anon_id
+    }));
+
+    res.json({
+      success: true,
+      data: {
+        id: post.id,
+        title: post.title,
+        content: post.content,
+        image_url: post.image_url,
+        like_count: post.like_count,
+        comment_count: post.comment_count,
+        created_at: post.created_at,
+        nickname: nicknameOf(post.anon_id),
+        liked,
+        is_mine: anon_id && post.anon_id === anon_id
+      },
+      comments: enrichedComments
+    });
+  } catch (err) {
+    console.error('community post detail error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 4) 글 삭제 (본인만)
+app.delete('/api/community/posts/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { anon_id } = req.body || {};
+    if (!validateAnonId(anon_id)) return res.status(400).json({ success: false, error: 'anon_id 필수' });
+
+    // 본인 검증 + soft delete
+    const { data, error } = await supabase.from('community_posts')
+      .update({ deleted: true })
+      .eq('id', id).eq('anon_id', anon_id)
+      .select().single();
+    if (error) throw error;
+    if (!data) return res.status(403).json({ success: false, error: '본인 글만 삭제할 수 있습니다' });
+    res.json({ success: true });
+  } catch (err) {
+    console.error('community post DELETE error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 5) 좋아요 토글
+app.post('/api/community/posts/:id/like', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { anon_id } = req.body || {};
+    if (!validateAnonId(anon_id)) return res.status(400).json({ success: false, error: 'anon_id 필수' });
+
+    // 글 존재 확인
+    const { data: post, error: pErr } = await supabase.from('community_posts')
+      .select('id, like_count, deleted').eq('id', id).single();
+    if (pErr || !post || post.deleted) return res.status(404).json({ success: false, error: '글을 찾을 수 없습니다' });
+
+    // 기존 좋아요 확인
+    const { data: existing } = await supabase.from('community_likes')
+      .select('id').eq('post_id', id).eq('anon_id', anon_id).maybeSingle();
+
+    let liked;
+    if (existing) {
+      // 취소
+      await supabase.from('community_likes').delete().eq('id', existing.id);
+      liked = false;
+    } else {
+      // 추가 (UNIQUE 제약으로 race-safe)
+      const { error: insErr } = await supabase.from('community_likes').insert([{ post_id: id, anon_id }]);
+      if (insErr && insErr.code !== '23505') throw insErr; // 23505 = duplicate (race) → liked로 처리
+      liked = true;
+    }
+
+    // like_count 재계산 (가장 정확)
+    const { count } = await supabase.from('community_likes')
+      .select('*', { count: 'exact', head: true }).eq('post_id', id);
+    await supabase.from('community_posts').update({ like_count: count || 0 }).eq('id', id);
+
+    res.json({ success: true, liked, like_count: count || 0 });
+  } catch (err) {
+    console.error('community like error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 6) 댓글 작성
+app.post('/api/community/posts/:id/comments', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { anon_id, content } = req.body || {};
+    if (!validateAnonId(anon_id)) return res.status(400).json({ success: false, error: 'anon_id 필수' });
+    const c = clampStr(content || '', 500).trim();
+    if (!c) return res.status(400).json({ success: false, error: '댓글 내용은 필수' });
+
+    // 글 존재 확인
+    const { data: post } = await supabase.from('community_posts')
+      .select('id, comment_count, deleted').eq('id', id).single();
+    if (!post || post.deleted) return res.status(404).json({ success: false, error: '글을 찾을 수 없습니다' });
+
+    // 댓글 INSERT
+    const { data: cmt, error: cErr } = await supabase.from('community_comments')
+      .insert([{ post_id: id, anon_id, content: c }])
+      .select().single();
+    if (cErr) throw cErr;
+
+    // comment_count 재계산
+    const { count } = await supabase.from('community_comments')
+      .select('*', { count: 'exact', head: true }).eq('post_id', id).eq('deleted', false);
+    await supabase.from('community_posts').update({ comment_count: count || 0 }).eq('id', id);
+
+    res.json({
+      success: true,
+      data: {
+        id: cmt.id,
+        content: cmt.content,
+        created_at: cmt.created_at,
+        nickname: nicknameOf(anon_id)
+      }
+    });
+  } catch (err) {
+    console.error('community comment POST error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 7) 댓글 삭제 (본인만)
+app.delete('/api/community/comments/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { anon_id } = req.body || {};
+    if (!validateAnonId(anon_id)) return res.status(400).json({ success: false, error: 'anon_id 필수' });
+
+    // 댓글 본인 확인 + soft delete
+    const { data: cmt, error: cErr } = await supabase.from('community_comments')
+      .update({ deleted: true })
+      .eq('id', id).eq('anon_id', anon_id)
+      .select('id, post_id').single();
+    if (cErr) throw cErr;
+    if (!cmt) return res.status(403).json({ success: false, error: '본인 댓글만 삭제할 수 있습니다' });
+
+    // post의 comment_count 감소
+    const { count } = await supabase.from('community_comments')
+      .select('*', { count: 'exact', head: true }).eq('post_id', cmt.post_id).eq('deleted', false);
+    await supabase.from('community_posts').update({ comment_count: count || 0 }).eq('id', cmt.post_id);
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('community comment DELETE error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
