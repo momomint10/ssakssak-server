@@ -1123,6 +1123,51 @@ app.post('/api/workers', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
+// 워커 상세 조회
+// 프론트가 워커 카드 클릭 시 호출. 라우트 부재로 채팅 진입 자체가 깨졌던 문제 해소.
+app.get('/api/workers/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data, error } = await supabase.from('worker_profiles')
+      .select('*')
+      .eq('id', id)
+      .neq('status', 'deleted')
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ success: false, error: '구직자 프로필을 찾을 수 없습니다' });
+    res.json({ success: true, data });
+  } catch (e) {
+    console.error('workers GET :id error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// 워커 상태 변경 (active / inactive)
+// 본인만 변경 가능 — anon_id로 본인 검증
+app.patch('/api/workers/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { anon_id, status } = req.body || {};
+    if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필수' });
+    if (!status || !['active', 'inactive'].includes(status)) {
+      return res.status(400).json({ success: false, error: 'status는 active 또는 inactive' });
+    }
+
+    // 본인 검증 + 상태 변경
+    const { data, error } = await supabase.from('worker_profiles')
+      .update({ status })
+      .eq('id', id)
+      .eq('anon_id', anon_id)
+      .select().single();
+    if (error) throw error;
+    if (!data) return res.status(403).json({ success: false, error: '본인 프로필만 변경할 수 있습니다' });
+    res.json({ success: true, data });
+  } catch (e) {
+    console.error('workers PATCH status error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // 프로필 삭제
 app.delete('/api/workers/:id', async (req, res) => {
   try {
