@@ -1,11 +1,67 @@
 const express = require('express');
 const cors = require('cors');
+const rateLimit = require('express-rate-limit');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
-app.use(cors());
+
+// ── CORS 화이트리스트 (패치 C) ──────────────────────────────
+// 운영 도메인만 허용. 개발 시 origin 추가 또는 ALLOW_ALL_ORIGINS=1 환경변수로 우회
+const ALLOWED_ORIGINS = [
+  'https://ssakapp.co.kr',
+  'https://www.ssakapp.co.kr',
+  'https://momomint10.github.io'
+];
+app.use(cors({
+  origin: function(origin, cb) {
+    // origin 없는 요청 (서버사이드, curl, 모바일 webview 일부) 허용
+    if (!origin) return cb(null, true);
+    if (process.env.ALLOW_ALL_ORIGINS === '1') return cb(null, true);
+    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    return cb(new Error('CORS: origin not allowed'));
+  },
+  credentials: false
+}));
+
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ limit: '20mb', extended: true }));
+
+// ── Rate Limit (패치 B) ─────────────────────────────────────
+// 일반 라우트: IP당 분당 100회
+const generalLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: '요청이 너무 많습니다. 잠시 후 다시 시도해주세요.' }
+});
+// 쓰기 라우트: IP당 분당 30회 (POST/PUT/DELETE에 더 강하게)
+const writeLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: '쓰기 요청 한도 초과. 잠시 후 다시 시도해주세요.' }
+});
+// SMS 발송 / 계약서 생성 등 비용 발생: IP당 분당 10회
+const expensiveLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: 'SMS·계약서 등 비용 발생 요청 한도 초과.' }
+});
+
+// 모든 /api/* 에 일반 limiter 적용
+app.use('/api/', generalLimiter);
+// 비용 발생 경로에 추가 limiter
+app.use('/send-sms', expensiveLimiter);
+app.use('/api/booking', writeLimiter);          // 고객 신청 spam 방어
+app.use('/api/schedules', writeLimiter);
+app.use('/api/jobs', writeLimiter);
+app.use('/api/market/listings', writeLimiter);
+app.use('/api/market/chats', writeLimiter);
+app.use('/api/worker-chats', writeLimiter);
 
 // Supabase 연결
 const supabase = createClient(
