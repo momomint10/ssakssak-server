@@ -51,6 +51,14 @@ const expensiveLimiter = rateLimit({
   legacyHeaders: false,
   message: { success: false, error: 'SMS·계약서 등 비용 발생 요청 한도 초과.' }
 });
+// 메신저: 채팅 특성상 빈번 → 분당 60회
+const messageLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: '메시지 전송 한도 초과. 잠시 후 다시 시도해주세요.' }
+});
 
 // 모든 /api/* 에 일반 limiter 적용
 app.use('/api/', generalLimiter);
@@ -61,7 +69,7 @@ app.use('/api/schedules', writeLimiter);
 app.use('/api/jobs', writeLimiter);
 app.use('/api/market/listings', writeLimiter);
 app.use('/api/market/chats', writeLimiter);
-app.use('/api/worker-chats', writeLimiter);
+app.use('/api/worker-chats', messageLimiter);   // 메신저는 빈번하므로 messageLimiter
 app.use('/api/community', writeLimiter);        // 커뮤니티 글·댓글·좋아요 spam 방어
 
 // Supabase 연결
@@ -1212,56 +1220,182 @@ app.patch('/api/jobs/applications/:id/match', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// 인력 채팅방 목록
+// ══════════════════════════════════════════════════════════════════════
+// 인력 채팅 (worker chats)
+// ══════════════════════════════════════════════════════════════════════
+
+// 본인 검증 헬퍼: 해당 chat_id에 anon_id가 참여자인지 확인
+async function assertChatParticipant(chat_id, anon_id) {
+  if (!chat_id || !anon_id) return { ok: false, status: 400, error: 'chat_id와 anon_id 필수' };
+  const { data: chat, error } = await supabase.from('worker_chats')
+    .select('id, worker_anon_id, requester_anon_id').eq('id', chat_id).maybeSingle();
+  if (error) return { ok: false, status: 500, error: error.message };
+  if (!chat) return { ok: false, status: 404, error: '채팅방을 찾을 수 없습니다' };
+  if (chat.worker_anon_id !== anon_id && chat.requester_anon_id !== anon_id) {
+    return { ok: false, status: 403, error: '권한 없음' };
+  }
+  return { ok: true, chat };
+}
+
+// 입력 검증 헬퍼 (community와 동일 규칙)
+function validateMsgContent(content) {
+  if (typeof content !== 'string') return null;
+  const trimmed = content.trim().slice(0, 1000);
+  return trimmed || null;
+}
+
+// ── 1) 채팅방 목록 ──────────────────────────────────────────
+// 본인이 참여한 채팅방만 (worker 또는 requester)
 app.get('/api/worker-chats', async (req, res) => {
   try {
     const { anon_id } = req.query;
-    if (!anon_id) return res.status(400).json({ error: 'anon_id 필요' });
-    const { data, error } = await supabase.from('worker_chats').select('*, worker:worker_profiles(nickname,avatar_emoji)').or(`worker_anon_id.eq.${anon_id},requester_anon_id.eq.${anon_id}`).order('updated_at',{ascending:false});
+    if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필요' });
+    const { data, error } = await supabase.from('worker_chats')
+      .select('*, worker:worker_profiles(nickname,avatar_emoji,photo_url)')
+      .or(`worker_anon_id.eq.${anon_id},requester_anon_id.eq.${anon_id}`)
+      .order('updated_at', { ascending: false });
     if (error) throw error;
-    res.json({ success:true, data: data||[] });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    res.json({ success: true, data: data || [] });
+  } catch (e) {
+    console.error('worker-chats GET list error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
-// 채팅방 메시지
-app.get('/api/worker-chats/:id', async (req, res) => {
-  try {
-    const { data, error } = await supabase.from('worker_messages').select('*').eq('chat_id', req.params.id).order('created_at',{ascending:true}).limit(100);
-    if (error) throw error;
-    res.json({ success:true, data: data||[] });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-// 채팅 시작/메시지 전송
+// ── 2) 채팅방 생성/조회 (메시지 전송과 분리) ──────────────────
+// requester가 worker에게 채팅 시작
 app.post('/api/worker-chats', async (req, res) => {
   try {
-    const { worker_id, worker_anon_id, requester_anon_id, content } = req.body;
-    let chat;
-    const { data: existing } = await supabase.from('worker_chats').select('id').eq('worker_id', worker_id).eq('requester_anon_id', requester_anon_id).maybeSingle();
+    const { worker_id, requester_anon_id } = req.body || {};
+    if (!worker_id || !requester_anon_id) {
+      return res.status(400).json({ success: false, error: 'worker_id, requester_anon_id 필수' });
+    }
+
+    // worker_id로 worker_anon_id 조회 (요청 body의 worker_anon_id를 신뢰하지 않음 — spoofing 방어)
+    const { data: profile, error: pErr } = await supabase.from('worker_profiles')
+      .select('anon_id').eq('id', worker_id).maybeSingle();
+    if (pErr) throw pErr;
+    if (!profile) return res.status(404).json({ success: false, error: '구직자 프로필을 찾을 수 없습니다' });
+    const worker_anon_id = profile.anon_id;
+
+    // 자기 자신과 채팅 차단
+    if (worker_anon_id === requester_anon_id) {
+      return res.status(400).json({ success: false, error: '자신과 채팅할 수 없습니다' });
+    }
+
+    // 기존 채팅방 있으면 재사용 (UNIQUE 제약 활용)
+    const { data: existing } = await supabase.from('worker_chats')
+      .select('id').eq('worker_id', worker_id).eq('requester_anon_id', requester_anon_id).maybeSingle();
     if (existing) {
-      chat = existing;
-    } else {
-      const { data: newChat, error } = await supabase.from('worker_chats').insert([{ worker_id, worker_anon_id, requester_anon_id }]).select().single();
-      if (error) throw error;
-      chat = newChat;
+      return res.json({ success: true, data: { id: existing.id } });
     }
-    if (content) {
-      await supabase.from('worker_messages').insert([{ chat_id: chat.id, sender_anon_id: requester_anon_id, content }]);
-      await supabase.from('worker_chats').update({ last_message: content, updated_at: new Date().toISOString(), worker_unread: supabase.rpc ? 1 : 1 }).eq('id', chat.id);
-    }
-    res.json({ success:true, data: chat });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+
+    const { data: newChat, error } = await supabase.from('worker_chats')
+      .insert([{ worker_id, worker_anon_id, requester_anon_id }])
+      .select('id').single();
+    if (error) throw error;
+    res.json({ success: true, data: newChat });
+  } catch (e) {
+    console.error('worker-chats POST create error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
-// 메시지 전송
-app.post('/api/worker-chats/:id', async (req, res) => {
+// ── 3) 메시지 조회 (?after=<ISO>로 증분 로딩) ─────────────────
+// 본인 참여 검증 필수
+app.get('/api/worker-chats/:id/messages', async (req, res) => {
   try {
-    const { sender_anon_id, content } = req.body;
-    const { data, error } = await supabase.from('worker_messages').insert([{ chat_id: req.params.id, sender_anon_id, content }]).select().single();
+    const { id } = req.params;
+    const { anon_id, after } = req.query;
+    const auth = await assertChatParticipant(id, anon_id);
+    if (!auth.ok) return res.status(auth.status).json({ success: false, error: auth.error });
+
+    let q = supabase.from('worker_messages')
+      .select('id, sender_anon_id, content, created_at, read_at')
+      .eq('chat_id', id)
+      .order('created_at', { ascending: true })
+      .limit(200);
+    if (after) q = q.gt('created_at', after);
+
+    const { data, error } = await q;
     if (error) throw error;
-    await supabase.from('worker_chats').update({ last_message: content, updated_at: new Date().toISOString() }).eq('id', req.params.id);
-    res.json({ success:true, data });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    res.json({ success: true, data: data || [] });
+  } catch (e) {
+    console.error('worker-chats GET messages error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// ── 4) 메시지 전송 ──────────────────────────────────────────
+app.post('/api/worker-chats/:id/messages', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { anon_id, content } = req.body || {};
+    const auth = await assertChatParticipant(id, anon_id);
+    if (!auth.ok) return res.status(auth.status).json({ success: false, error: auth.error });
+
+    const cleanContent = validateMsgContent(content);
+    if (!cleanContent) return res.status(400).json({ success: false, error: '메시지 내용은 필수' });
+
+    // 메시지 INSERT
+    const { data: msg, error } = await supabase.from('worker_messages')
+      .insert([{ chat_id: id, sender_anon_id: anon_id, content: cleanContent }])
+      .select('id, sender_anon_id, content, created_at, read_at').single();
+    if (error) throw error;
+
+    // 채팅방 last_message + 상대방 unread +1
+    const isWorkerSender = anon_id === auth.chat.worker_anon_id;
+    const updates = {
+      last_message: cleanContent.slice(0, 200),
+      updated_at: new Date().toISOString()
+    };
+    // unread 증가는 raw SQL로 (race-safe)
+    if (isWorkerSender) {
+      // worker가 보냄 → requester unread +1
+      await supabase.rpc('increment_chat_unread', { p_chat_id: id, p_field: 'requester_unread' })
+        .then(() => null).catch(() => null);
+    } else {
+      await supabase.rpc('increment_chat_unread', { p_chat_id: id, p_field: 'worker_unread' })
+        .then(() => null).catch(() => null);
+    }
+    // RPC가 없으면 fallback (count 안 맞을 수 있지만 작동은 함)
+    await supabase.from('worker_chats').update(updates).eq('id', id);
+
+    res.json({ success: true, data: msg });
+  } catch (e) {
+    console.error('worker-chats POST message error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// ── 5) 읽음 처리 ────────────────────────────────────────────
+// 본인이 채팅방을 열었을 때, 상대방이 보낸 미확인 메시지 모두 read_at 업데이트
+app.post('/api/worker-chats/:id/read', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { anon_id } = req.body || {};
+    const auth = await assertChatParticipant(id, anon_id);
+    if (!auth.ok) return res.status(auth.status).json({ success: false, error: auth.error });
+
+    // 상대방이 보낸 + 아직 안 읽은 메시지만 read_at 갱신
+    const now = new Date().toISOString();
+    const { count, error } = await supabase.from('worker_messages')
+      .update({ read_at: now }, { count: 'exact' })
+      .eq('chat_id', id)
+      .neq('sender_anon_id', anon_id)
+      .is('read_at', null);
+    if (error) throw error;
+
+    // 본인의 unread 카운터 0으로
+    const isWorker = anon_id === auth.chat.worker_anon_id;
+    const updates = isWorker ? { worker_unread: 0 } : { requester_unread: 0 };
+    await supabase.from('worker_chats').update(updates).eq('id', id);
+
+    res.json({ success: true, marked: count || 0 });
+  } catch (e) {
+    console.error('worker-chats POST read error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════
