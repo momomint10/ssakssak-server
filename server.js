@@ -1339,6 +1339,26 @@ app.get('/api/jobs/my/applied', async (req, res) => {
   }
 });
 
+// 채용공고 상세 조회
+// 누구나 조회 가능 (공고는 공개 정보) — anon_id 검증 없음
+// 단, deleted 상태는 제외
+app.get('/api/jobs/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data, error } = await supabase.from('job_posts')
+      .select('*')
+      .eq('id', id)
+      .neq('status', 'deleted')
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ success: false, error: '공고를 찾을 수 없습니다' });
+    res.json({ success: true, data });
+  } catch (e) {
+    console.error('jobs GET :id error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // 채용공고 등록
 // body: { anon_id, title, region, work_date, headcount, daily_rate, skills, description, contact }
 app.post('/api/jobs', async (req, res) => {
