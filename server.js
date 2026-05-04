@@ -1284,92 +1284,186 @@ app.delete('/api/workers/:id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// 채용공고 목록
+// ══════════════════════════════════════════════════════════════════════
+// 채용공고 (jobs) — 라우트 미스매치 일괄 수정
+// 이전 문제:
+//   - 서버: 'job_postings' / 'poster_anon_id' / 'regions' 배열 contains
+//   - DB:   'job_posts'    / 'anon_id'        / 'region' 단일값
+//   - 프론트: anon_id 키로 보냄 (DB와 일치)
+// ══════════════════════════════════════════════════════════════════════
+
+// 채용공고 목록 (지역 필터)
 app.get('/api/jobs', async (req, res) => {
   try {
-    const { region, status, anon_id } = req.query;
-    let q = supabase.from('job_postings').select('*').order('created_at',{ascending:false});
-    if (status) q = q.eq('status', status);
-    else q = q.eq('status','open');
-    if (region) q = q.contains('regions',[region]);
+    const { region, status } = req.query;
+    let q = supabase.from('job_posts').select('*').order('created_at', { ascending: false });
+    q = q.eq('status', status || 'open');
+    if (region && region !== '전체') q = q.eq('region', region);
     const { data, error } = await q;
     if (error) throw error;
-    res.json({ success:true, data: data||[] });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    res.json({ success: true, data: data || [] });
+  } catch (e) {
+    console.error('jobs GET error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
 // 내가 올린 채용공고
 app.get('/api/jobs/my/posted', async (req, res) => {
   try {
     const { anon_id } = req.query;
-    if (!anon_id) return res.status(400).json({ error: 'anon_id 필요' });
-    const { data, error } = await supabase.from('job_postings').select('*').eq('poster_anon_id', anon_id).order('created_at',{ascending:false});
+    if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필요' });
+    const { data, error } = await supabase.from('job_posts').select('*')
+      .eq('anon_id', anon_id).order('created_at', { ascending: false });
     if (error) throw error;
-    res.json({ success:true, data: data||[] });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    res.json({ success: true, data: data || [] });
+  } catch (e) {
+    console.error('jobs my/posted error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
 // 내가 지원한 채용공고
 app.get('/api/jobs/my/applied', async (req, res) => {
   try {
     const { anon_id } = req.query;
-    if (!anon_id) return res.status(400).json({ error: 'anon_id 필요' });
-    const { data, error } = await supabase.from('job_applications').select('*, job:job_postings(*)').eq('applicant_anon_id', anon_id).order('created_at',{ascending:false});
+    if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필요' });
+    const { data, error } = await supabase.from('job_applications')
+      .select('*, job:job_posts(*)')
+      .eq('applicant_anon_id', anon_id).order('created_at', { ascending: false });
     if (error) throw error;
-    res.json({ success:true, data: data||[] });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    res.json({ success: true, data: data || [] });
+  } catch (e) {
+    console.error('jobs my/applied error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
 // 채용공고 등록
+// body: { anon_id, title, region, work_date, headcount, daily_rate, skills, description, contact }
 app.post('/api/jobs', async (req, res) => {
   try {
-    const body = req.body;
-    if (!body.poster_anon_id || !body.title) return res.status(400).json({ error: '필수값 누락' });
-    const { data, error } = await supabase.from('job_postings').insert([{ ...body, status:'open' }]).select().single();
+    const { anon_id, title, region, work_date, headcount, daily_rate, skills, description, contact } = req.body || {};
+    if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필수' });
+    if (!title || !title.trim()) return res.status(400).json({ success: false, error: '공고 제목 필수' });
+    if (!region) return res.status(400).json({ success: false, error: '지역 필수' });
+    if (!work_date) return res.status(400).json({ success: false, error: '작업 날짜 필수' });
+
+    const row = {
+      anon_id,
+      title: String(title).trim().slice(0, 100),
+      region,
+      work_date,
+      headcount: Math.max(1, Math.min(99, parseInt(headcount) || 1)),
+      daily_rate: Math.max(0, parseInt(daily_rate) || 0),
+      skills: Array.isArray(skills) ? skills.slice(0, 10) : [],
+      description: String(description || '').slice(0, 1000),
+      contact: String(contact || '').slice(0, 50),
+      status: 'open'
+    };
+    const { data, error } = await supabase.from('job_posts').insert([row]).select().single();
     if (error) throw error;
-    res.json({ success:true, data });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    res.json({ success: true, data });
+  } catch (e) {
+    console.error('jobs POST error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
-// 채용공고 상태 변경
+// 채용공고 상태 변경 (본인만 — 보안 정책 일관 적용)
 app.patch('/api/jobs/:id/status', async (req, res) => {
   try {
-    const { status } = req.body;
-    const { error } = await supabase.from('job_postings').update({ status }).eq('id', req.params.id);
+    const { id } = req.params;
+    const { anon_id, status } = req.body || {};
+    if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필수' });
+    if (!status || !['open', 'closed', 'matched'].includes(status)) {
+      return res.status(400).json({ success: false, error: 'status는 open/closed/matched' });
+    }
+    const { data, error } = await supabase.from('job_posts')
+      .update({ status })
+      .eq('id', id).eq('anon_id', anon_id)
+      .select().single();
     if (error) throw error;
-    res.json({ success:true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    if (!data) return res.status(403).json({ success: false, error: '본인 공고만 변경 가능' });
+    res.json({ success: true, data });
+  } catch (e) {
+    console.error('jobs PATCH status error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
 // 지원하기
 app.post('/api/jobs/:id/apply', async (req, res) => {
   try {
-    const { applicant_anon_id, message } = req.body;
-    if (!applicant_anon_id) return res.status(400).json({ error: 'anon_id 필요' });
+    const { applicant_anon_id, applicant_contact, worker_nickname, message } = req.body || {};
+    if (!applicant_anon_id) return res.status(400).json({ success: false, error: 'anon_id 필요' });
+
+    // 자기 자신의 공고에 지원 차단
+    const { data: post } = await supabase.from('job_posts').select('anon_id, status').eq('id', req.params.id).maybeSingle();
+    if (!post) return res.status(404).json({ success: false, error: '공고를 찾을 수 없습니다' });
+    if (post.status !== 'open') return res.status(400).json({ success: false, error: '마감된 공고입니다' });
+    if (post.anon_id === applicant_anon_id) return res.status(400).json({ success: false, error: '본인 공고에는 지원할 수 없습니다' });
+
     const { data, error } = await supabase.from('job_applications')
-      .upsert([{ job_id: req.params.id, applicant_anon_id, message: message||'', status:'pending' }], { onConflict: 'job_id,applicant_anon_id' })
+      .upsert([{
+        job_id: req.params.id,
+        applicant_anon_id,
+        applicant_contact: String(applicant_contact || '').slice(0, 50),
+        worker_nickname: String(worker_nickname || '구직자').slice(0, 30),
+        message: String(message || '').slice(0, 200),
+        status: 'pending'
+      }], { onConflict: 'job_id,applicant_anon_id' })
       .select().single();
     if (error) throw error;
-    res.json({ success:true, data });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    res.json({ success: true, data });
+  } catch (e) {
+    console.error('jobs apply error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
-// 지원자 목록
+// 지원자 목록 (공고 작성자만 — 보안 정책)
 app.get('/api/jobs/:id/applications', async (req, res) => {
   try {
-    const { data, error } = await supabase.from('job_applications').select('*').eq('job_id', req.params.id).order('created_at',{ascending:false});
+    const { anon_id } = req.query;
+    if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필수' });
+
+    // 본인 공고인지 확인
+    const { data: post } = await supabase.from('job_posts').select('anon_id').eq('id', req.params.id).maybeSingle();
+    if (!post) return res.status(404).json({ success: false, error: '공고를 찾을 수 없습니다' });
+    if (post.anon_id !== anon_id) return res.status(403).json({ success: false, error: '본인 공고의 지원자만 조회 가능' });
+
+    const { data, error } = await supabase.from('job_applications').select('*')
+      .eq('job_id', req.params.id).order('created_at', { ascending: false });
     if (error) throw error;
-    res.json({ success:true, data: data||[] });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    res.json({ success: true, data: data || [] });
+  } catch (e) {
+    console.error('jobs applications GET error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
-// 매칭 확정
+// 매칭 확정 (공고 작성자만)
 app.patch('/api/jobs/applications/:id/match', async (req, res) => {
   try {
-    const { error } = await supabase.from('job_applications').update({ status:'matched' }).eq('id', req.params.id);
+    const { anon_id, employer_contact } = req.body || {};
+    if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필수' });
+
+    // 지원서 + 해당 공고 작성자 검증
+    const { data: app } = await supabase.from('job_applications').select('job_id').eq('id', req.params.id).maybeSingle();
+    if (!app) return res.status(404).json({ success: false, error: '지원서를 찾을 수 없습니다' });
+    const { data: post } = await supabase.from('job_posts').select('anon_id').eq('id', app.job_id).maybeSingle();
+    if (!post || post.anon_id !== anon_id) return res.status(403).json({ success: false, error: '본인 공고의 지원자만 매칭 가능' });
+
+    const { error } = await supabase.from('job_applications')
+      .update({ status: 'matched', employer_contact: String(employer_contact || '').slice(0, 50), matched_at: new Date().toISOString() })
+      .eq('id', req.params.id);
     if (error) throw error;
-    res.json({ success:true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    res.json({ success: true });
+  } catch (e) {
+    console.error('jobs match error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
 // ══════════════════════════════════════════════════════════════════════
