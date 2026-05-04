@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
+const webpush = require('web-push');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
@@ -71,12 +72,64 @@ app.use('/api/market/listings', writeLimiter);
 app.use('/api/market/chats', writeLimiter);
 app.use('/api/worker-chats', messageLimiter);   // 메신저는 빈번하므로 messageLimiter
 app.use('/api/community', writeLimiter);        // 커뮤니티 글·댓글·좋아요 spam 방어
+app.use('/api/push', writeLimiter);             // 푸시 구독 등록·해제 spam 방어
 
 // Supabase 연결
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY
 );
+
+// ── Web Push 초기화 (Phase 3-A) ──────────────────────────
+// VAPID 키는 Railway 환경변수에 설정. 미설정 시 푸시 비활성화 (서버 자체는 정상 가동)
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || '';
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
+const VAPID_SUBJECT = process.env.VAPID_SUBJECT || 'mailto:contact@ssakapp.co.kr';
+const PUSH_ENABLED = !!(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY);
+if (PUSH_ENABLED) {
+  webpush.setVapidDetails(VAPID_SUBJECT, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
+  console.log('✅ Web Push 활성화');
+} else {
+  console.log('⚠️  Web Push 비활성화 (VAPID 키 미설정)');
+}
+
+// 푸시 발송 헬퍼: 특정 anon_id의 모든 구독으로 푸시 발송
+// 만료된 구독은 자동 제거 (410 Gone 에러)
+async function sendPushTo(anon_id, payload) {
+  if (!PUSH_ENABLED || !anon_id) return { sent: 0, failed: 0 };
+  try {
+    const { data: subs, error } = await supabase.from('push_subscriptions')
+      .select('endpoint, p256dh, auth')
+      .eq('anon_id', anon_id);
+    if (error || !subs || !subs.length) return { sent: 0, failed: 0 };
+
+    const json = JSON.stringify(payload);
+    let sent = 0, failed = 0;
+    const stale = [];
+    await Promise.allSettled(subs.map(async s => {
+      try {
+        await webpush.sendNotification(
+          { endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth } },
+          json
+        );
+        sent++;
+      } catch (err) {
+        failed++;
+        // 410 Gone / 404 Not Found = 만료된 구독 → 정리
+        if (err.statusCode === 404 || err.statusCode === 410) {
+          stale.push(s.endpoint);
+        }
+      }
+    }));
+    if (stale.length) {
+      await supabase.from('push_subscriptions').delete().in('endpoint', stale);
+    }
+    return { sent, failed };
+  } catch (e) {
+    console.error('sendPushTo error:', e.message);
+    return { sent: 0, failed: 0 };
+  }
+}
 
 // ── 서버 상태 확인 ──────────────────────────────
 app.get('/', (req, res) => {
@@ -947,6 +1000,60 @@ app.delete('/api/community/comments/:id', async (req, res) => {
   }
 });
 
+// ══════════════════════════════════════════════════════════════════════
+// Web Push API (Phase 3-A)
+// ══════════════════════════════════════════════════════════════════════
+
+// VAPID 공개키 제공 — 클라이언트가 구독 시 사용
+app.get('/api/push/vapid-key', (req, res) => {
+  if (!PUSH_ENABLED) return res.status(503).json({ success: false, error: 'Push 비활성화' });
+  res.json({ success: true, publicKey: VAPID_PUBLIC_KEY });
+});
+
+// 구독 등록
+// body: { endpoint, p256dh, auth, anon_id, deviceId? }
+app.post('/api/push/subscribe', async (req, res) => {
+  try {
+    const { endpoint, p256dh, auth, anon_id, deviceId } = req.body || {};
+    if (!endpoint || !p256dh || !auth) {
+      return res.status(400).json({ success: false, error: 'endpoint, p256dh, auth 필수' });
+    }
+    if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필수' });
+
+    // endpoint UNIQUE 제약 활용 — upsert로 중복 시 갱신
+    const { data, error } = await supabase.from('push_subscriptions')
+      .upsert([{
+        endpoint,
+        p256dh,
+        auth,
+        anon_id,
+        device_id: deviceId || null,
+        updated_at: new Date().toISOString()
+      }], { onConflict: 'endpoint' })
+      .select().single();
+    if (error) throw error;
+    res.json({ success: true, data: { id: data.id } });
+  } catch (e) {
+    console.error('push subscribe error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// 구독 해제
+// body: { endpoint }
+app.delete('/api/push/subscribe', async (req, res) => {
+  try {
+    const { endpoint } = req.body || {};
+    if (!endpoint) return res.status(400).json({ success: false, error: 'endpoint 필수' });
+    const { error } = await supabase.from('push_subscriptions').delete().eq('endpoint', endpoint);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (e) {
+    console.error('push unsubscribe error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ── 예약 신청 접수 ─────────────────────────────────────────────────────────
 app.post('/api/booking', async (req, res) => {
   try {
@@ -1405,6 +1512,16 @@ app.post('/api/worker-chats/:id/messages', async (req, res) => {
     }
     // RPC가 없으면 fallback (count 안 맞을 수 있지만 작동은 함)
     await supabase.from('worker_chats').update(updates).eq('id', id);
+
+    // ── Push 알림 발송 (Phase 3-A) ──────────────────────────
+    // 수신자(상대방)에게 푸시 발송 — 비동기, 응답 차단하지 않음
+    const recipientAnonId = isWorkerSender ? auth.chat.requester_anon_id : auth.chat.worker_anon_id;
+    sendPushTo(recipientAnonId, {
+      title: '🧹 새 메시지',
+      body: cleanContent.slice(0, 100),
+      tag: 'chat-' + id,                  // 같은 채팅방 알림은 1개로 묶임 (Smart Grouping)
+      url: '/workforce.html?chat=' + id   // 클릭 시 채팅방 자동 진입
+    }).catch(() => {});
 
     res.json({ success: true, data: msg });
   } catch (e) {
