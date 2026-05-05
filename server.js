@@ -1166,6 +1166,64 @@ app.put('/api/bookings/:id/status', async (req, res) => {
   }
 });
 
+// ──────────────────────────────────────────────────────────────
+// 📅 예약 단축 URL 토큰 (booking_tokens 테이블 활용)
+// 긴 URL → 짧은 ?t=xxx 토큰 URL로 변환
+// ──────────────────────────────────────────────────────────────
+app.post('/api/booking/token', async (req, res) => {
+  try {
+    const { name, phone, size, type, price, companyName } = req.body || {};
+    if (!phone || !size) return res.status(400).json({ success: false, error: 'phone, size 필수' });
+
+    // 8자 base62 토큰 생성 + 충돌 회피 (최대 5회 재시도)
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let token = '';
+    for (let attempt = 0; attempt < 5; attempt++) {
+      token = '';
+      for (let j = 0; j < 8; j++) token += chars[Math.floor(Math.random() * chars.length)];
+      const { data: dup } = await supabase.from('booking_tokens').select('id').eq('token', token).maybeSingle();
+      if (!dup) break;
+      if (attempt === 4) return res.status(500).json({ success: false, error: '토큰 생성 실패' });
+    }
+
+    const quote_data = {
+      name: String(name||'').slice(0, 50),
+      phone: String(phone).slice(0, 20),
+      size: String(size).slice(0, 10),
+      type: String(type||'').slice(0, 30),
+      price: String(price||'').slice(0, 12),
+      companyName: String(companyName||'서프로클린').slice(0, 50)
+    };
+
+    const { error } = await supabase.from('booking_tokens').insert([{ token, quote_data }]);
+    if (error) throw error;
+
+    res.json({ success: true, token, url: `https://ssakapp.co.kr/booking.html?t=${token}` });
+  } catch (e) {
+    console.error('booking token POST error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.get('/api/booking/token/:token', async (req, res) => {
+  try {
+    const { token } = req.params;
+    if (!token || token.length > 20) return res.status(400).json({ success: false, error: 'token 형식 오류' });
+
+    const { data, error } = await supabase.from('booking_tokens')
+      .select('quote_data, expires_at').eq('token', token).maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ success: false, error: '유효하지 않은 링크' });
+    if (data.expires_at && new Date(data.expires_at) < new Date()) {
+      return res.status(410).json({ success: false, error: '만료된 링크' });
+    }
+    res.json({ success: true, data: data.quote_data || {} });
+  } catch (e) {
+    console.error('booking token GET error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // 서버 시작
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
