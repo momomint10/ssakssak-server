@@ -1674,6 +1674,28 @@ app.post('/api/worker-chats/:id/read', async (req, res) => {
   }
 });
 
+// ── 6) 미확인 메시지 카운트 (배지용 — Phase 3-B) ─────────────
+// 본인이 참여한 모든 채팅방의 unread 합산. 가벼운 쿼리로 폴링용.
+app.get('/api/worker-chats/unread-count', async (req, res) => {
+  try {
+    const { anon_id } = req.query;
+    if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필요' });
+    const { data, error } = await supabase.from('worker_chats')
+      .select('worker_anon_id, requester_anon_id, worker_unread, requester_unread')
+      .or(`worker_anon_id.eq.${anon_id},requester_anon_id.eq.${anon_id}`);
+    if (error) throw error;
+    let count = 0;
+    (data || []).forEach(c => {
+      if (c.worker_anon_id === anon_id) count += (c.worker_unread || 0);
+      else if (c.requester_anon_id === anon_id) count += (c.requester_unread || 0);
+    });
+    res.json({ success: true, count });
+  } catch (e) {
+    console.error('worker-chats unread-count error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // ═══════════════════════════════════════════════════════════════
 // 🛒 중고거래 API
 // ═══════════════════════════════════════════════════════════════
