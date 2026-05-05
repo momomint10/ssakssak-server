@@ -1180,7 +1180,7 @@ app.post('/api/booking/token', async (req, res) => {
     let token = '';
     for (let attempt = 0; attempt < 5; attempt++) {
       token = '';
-      for (let j = 0; j < 8; j++) token += chars[Math.floor(Math.random() * chars.length)];
+      for (let j = 0; j < 6; j++) token += chars[Math.floor(Math.random() * chars.length)];
       const { data: dup } = await supabase.from('booking_tokens').select('id').eq('token', token).maybeSingle();
       if (!dup) break;
       if (attempt === 4) return res.status(500).json({ success: false, error: '토큰 생성 실패' });
@@ -1198,7 +1198,7 @@ app.post('/api/booking/token', async (req, res) => {
     const { error } = await supabase.from('booking_tokens').insert([{ token, quote_data }]);
     if (error) throw error;
 
-    res.json({ success: true, token, url: `https://ssakapp.co.kr/booking.html?t=${token}` });
+    res.json({ success: true, token, url: `https://ssakapp.co.kr/b/?t=${token}` });
   } catch (e) {
     console.error('booking token POST error:', e);
     res.status(500).json({ success: false, error: e.message });
