@@ -835,7 +835,7 @@ app.get('/api/community/posts/:id', async (req, res) => {
 
     const { data: post, error: pErr } = await supabase.from('community_posts')
       .select('id, anon_id, title, content, image_url, like_count, comment_count, created_at, deleted')
-      .eq('id', id).single();
+      .eq('id', id).maybeSingle();
     if (pErr) throw pErr;
     if (!post || post.deleted) return res.status(404).json({ success: false, error: '글을 찾을 수 없습니다' });
 
@@ -913,8 +913,9 @@ app.post('/api/community/posts/:id/like', async (req, res) => {
 
     // 글 존재 확인
     const { data: post, error: pErr } = await supabase.from('community_posts')
-      .select('id, like_count, deleted').eq('id', id).single();
-    if (pErr || !post || post.deleted) return res.status(404).json({ success: false, error: '글을 찾을 수 없습니다' });
+      .select('id, like_count, deleted').eq('id', id).maybeSingle();
+    if (pErr) throw pErr;
+    if (!post || post.deleted) return res.status(404).json({ success: false, error: '글을 찾을 수 없습니다' });
 
     // 기존 좋아요 확인
     const { data: existing } = await supabase.from('community_likes')
@@ -1356,13 +1357,23 @@ app.patch('/api/workers/:id/status', async (req, res) => {
   }
 });
 
-// 프로필 삭제
+// 프로필 삭제 (본인만 — anon_id 검증)
 app.delete('/api/workers/:id', async (req, res) => {
   try {
-    const { error } = await supabase.from('worker_profiles').update({ status:'deleted' }).eq('id', req.params.id);
+    const { anon_id } = req.body || {};
+    if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필수' });
+    const { data, error } = await supabase.from('worker_profiles')
+      .update({ status:'deleted' })
+      .eq('id', req.params.id)
+      .eq('anon_id', anon_id)
+      .select().single();
     if (error) throw error;
-    res.json({ success:true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    if (!data) return res.status(403).json({ success: false, error: '본인 프로필만 삭제할 수 있습니다' });
+    res.json({ success: true });
+  } catch(e) {
+    console.error('workers DELETE error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
 // ══════════════════════════════════════════════════════════════════════
