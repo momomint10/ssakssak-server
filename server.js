@@ -496,6 +496,11 @@ app.post('/api/contract/create', async (req, res) => {
   const ownerSignature = body.owner_signature|| body.ownerSignature|| null;
   const adminKey       = body.admin_key      || '';
 
+  // 보안: admin_key 검증 (사장님만 호출 가능)
+  if (adminKey !== process.env.ADMIN_KEY) {
+    return res.status(401).json({ success: false, error: '인증 실패' });
+  }
+
   if (!customerPhone) {
     return res.status(400).json({ error: '고객 연락처가 없습니다' });
   }
@@ -1100,10 +1105,17 @@ app.post('/api/booking', async (req, res) => {
 });
 
 app.get('/api/bookings', async (req, res) => {
+  // 보안: 사장님 데이터 → adminKey 필수 (header OR query 둘 다 수용)
+  const adminKey = req.headers['x-admin-key'] || req.query.adminKey || '';
+  if (adminKey !== process.env.ADMIN_KEY) {
+    return res.status(401).json({ success: false, error: '인증 실패' });
+  }
   try {
     const status = req.query.status || null;
+    const date = req.query.date || null;
     let query = supabase.from('bookings').select('*').order('created_at', { ascending: false });
     if (status) query = query.eq('status', status);
+    if (date) query = query.eq('date', date);
     const { data, error } = await query;
     if (error) throw error;
     res.json({ success: true, data });
@@ -1113,6 +1125,10 @@ app.get('/api/bookings', async (req, res) => {
 });
 
 app.patch('/api/bookings/:id', async (req, res) => {
+  const adminKey = req.headers['x-admin-key'] || req.query.adminKey || '';
+  if (adminKey !== process.env.ADMIN_KEY) {
+    return res.status(401).json({ success: false, error: '인증 실패' });
+  }
   try {
     const { id } = req.params;
     const { status } = req.body;
@@ -1125,9 +1141,10 @@ app.patch('/api/bookings/:id', async (req, res) => {
 });
 
 app.put('/api/bookings/:id/status', async (req, res) => {
-  const adminKey = req.headers['x-admin-key'];
+  // header OR query 둘 다 수용 (schedule.html 호환)
+  const adminKey = req.headers['x-admin-key'] || req.query.adminKey || '';
   if (adminKey !== process.env.ADMIN_KEY) {
-    return res.status(401).json({ error: '인증 실패' });
+    return res.status(401).json({ success: false, error: '인증 실패' });
   }
 
   const { id } = req.params;
@@ -1700,6 +1717,20 @@ app.get('/api/worker-chats/unread-count', async (req, res) => {
 // 🛒 중고거래 API
 // ═══════════════════════════════════════════════════════════════
 
+
+// market_chats 본인 참여 검증 헬퍼
+async function assertMarketChatParticipant(chat_id, anon_id) {
+  if (!chat_id || !anon_id) return { ok: false, status: 400, error: 'chat_id와 anon_id 필수' };
+  const { data: chat, error } = await supabase.from('market_chats')
+    .select('id, buyer_anon_id, seller_anon_id, listing_id').eq('id', chat_id).maybeSingle();
+  if (error) return { ok: false, status: 500, error: error.message };
+  if (!chat) return { ok: false, status: 404, error: '채팅방을 찾을 수 없습니다' };
+  if (chat.buyer_anon_id !== anon_id && chat.seller_anon_id !== anon_id) {
+    return { ok: false, status: 403, error: '권한 없음' };
+  }
+  return { ok: true, chat };
+}
+
 // 목록 조회 (무한스크롤 + 검색 + 카테고리)
 app.get('/api/market/listings', async (req, res) => {
   try {
@@ -1727,25 +1758,44 @@ app.get('/api/market/listings/mine', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// 상세 조회 + 조회수 증가
+// 상세 조회 + 조회수 증가 (jobs 사고 패턴 fix: maybeSingle + deleted 제외 + 404)
 app.get('/api/market/listings/:id', async (req, res) => {
   try {
-    const { data, error } = await supabase.from('market_listings').select('*').eq('id', req.params.id).single();
+    const { data, error } = await supabase.from('market_listings').select('*').eq('id', req.params.id).neq('status','deleted').maybeSingle();
     if (error) throw error;
+    if (!data) return res.status(404).json({ success: false, error: '상품을 찾을 수 없습니다' });
     supabase.from('market_listings').update({ views: (data.views||0)+1 }).eq('id', req.params.id).then(() => {});
     res.json({ success:true, data });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { res.status(500).json({ success:false, error: e.message }); }
 });
 
-// 등록
+// 등록 (화이트리스트 + 입력 검증 — body spread 차단)
 app.post('/api/market/listings', async (req, res) => {
   try {
-    const body = req.body;
-    if (!body.anon_id || !body.title || body.price === undefined) return res.status(400).json({ error: '필수값 누락' });
-    const { data, error } = await supabase.from('market_listings').insert([{ ...body, status:'available', views:0 }]).select().single();
+    const { anon_id, title, description, price, category, image_url, contact } = req.body || {};
+    if (!anon_id || !title || price === undefined) return res.status(400).json({ success:false, error: '필수값 누락' });
+
+    const cleanTitle = String(title).trim().slice(0, 100);
+    const cleanDesc  = String(description || '').trim().slice(0, 2000);
+    const cleanCat   = String(category || '기타').slice(0, 30);
+    const cleanCont  = String(contact || '').trim().slice(0, 50);
+    const numPrice   = parseInt(price, 10);
+
+    if (!cleanTitle) return res.status(400).json({ success:false, error: '제목 필수' });
+    if (!Number.isFinite(numPrice) || numPrice < 0 || numPrice > 99999999) {
+      return res.status(400).json({ success:false, error: '가격이 올바르지 않습니다' });
+    }
+
+    const insertData = {
+      anon_id, title: cleanTitle, description: cleanDesc, price: numPrice,
+      category: cleanCat, image_url: image_url || null, contact: cleanCont,
+      status: 'available', views: 0
+    };
+
+    const { data, error } = await supabase.from('market_listings').insert([insertData]).select().single();
     if (error) throw error;
     res.json({ success:true, data });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { res.status(500).json({ success:false, error: e.message }); }
 });
 
 // 상태 변경 (available/reserved/sold)
@@ -1779,19 +1829,33 @@ app.get('/api/market/chats', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// 채팅 메시지 조회
+// 채팅 메시지 조회 (본인 참여 검증)
 app.get('/api/market/chats/:id', async (req, res) => {
   try {
+    const { anon_id } = req.query;
+    const auth = await assertMarketChatParticipant(req.params.id, anon_id);
+    if (!auth.ok) return res.status(auth.status).json({ success: false, error: auth.error });
     const { data, error } = await supabase.from('market_messages').select('*').eq('chat_id', req.params.id).order('created_at',{ascending:true}).limit(100);
     if (error) throw error;
     res.json({ success:true, data: data||[] });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { res.status(500).json({ success:false, error: e.message }); }
 });
 
-// 채팅 시작/메시지 전송
+// 채팅 시작/메시지 전송 (seller 서버 조회 — 스푸핑 방어)
 app.post('/api/market/chats', async (req, res) => {
   try {
-    const { listing_id, buyer_anon_id, seller_anon_id, content } = req.body;
+    const { listing_id, buyer_anon_id, content } = req.body || {};
+    if (!listing_id || !buyer_anon_id) return res.status(400).json({ success: false, error: 'listing_id, buyer_anon_id 필수' });
+
+    // listing_id로 seller 서버 조회 (요청 body의 seller_anon_id를 신뢰하지 않음)
+    const { data: listing, error: lErr } = await supabase.from('market_listings')
+      .select('anon_id, status').eq('id', listing_id).maybeSingle();
+    if (lErr) throw lErr;
+    if (!listing) return res.status(404).json({ success: false, error: '상품을 찾을 수 없습니다' });
+    if (listing.status === 'deleted') return res.status(400).json({ success: false, error: '삭제된 상품입니다' });
+    const seller_anon_id = listing.anon_id;
+    if (seller_anon_id === buyer_anon_id) return res.status(400).json({ success: false, error: '자신과 채팅할 수 없습니다' });
+
     let chat;
     const { data: existing } = await supabase.from('market_chats').select('id').eq('listing_id', listing_id).eq('buyer_anon_id', buyer_anon_id).maybeSingle();
     if (existing) {
@@ -1802,20 +1866,27 @@ app.post('/api/market/chats', async (req, res) => {
       chat = newChat;
     }
     if (content) {
-      await supabase.from('market_messages').insert([{ chat_id: chat.id, sender_anon_id: buyer_anon_id, content }]);
-      await supabase.from('market_chats').update({ last_message: content, updated_at: new Date().toISOString() }).eq('id', chat.id);
+      const trimmed = String(content).trim().slice(0, 1000);
+      if (trimmed) {
+        await supabase.from('market_messages').insert([{ chat_id: chat.id, sender_anon_id: buyer_anon_id, content: trimmed }]);
+        await supabase.from('market_chats').update({ last_message: trimmed.slice(0,200), updated_at: new Date().toISOString() }).eq('id', chat.id);
+      }
     }
     res.json({ success:true, data: chat });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { res.status(500).json({ success:false, error: e.message }); }
 });
 
-// 메시지 전송
+// 메시지 전송 (본인 참여 검증 + 입력 검증)
 app.post('/api/market/chats/:id', async (req, res) => {
   try {
-    const { sender_anon_id, content } = req.body;
-    const { data, error } = await supabase.from('market_messages').insert([{ chat_id: req.params.id, sender_anon_id, content }]).select().single();
+    const { sender_anon_id, content } = req.body || {};
+    const auth = await assertMarketChatParticipant(req.params.id, sender_anon_id);
+    if (!auth.ok) return res.status(auth.status).json({ success: false, error: auth.error });
+    const trimmed = String(content || '').trim().slice(0, 1000);
+    if (!trimmed) return res.status(400).json({ success: false, error: '메시지 내용은 필수' });
+    const { data, error } = await supabase.from('market_messages').insert([{ chat_id: req.params.id, sender_anon_id, content: trimmed }]).select().single();
     if (error) throw error;
-    await supabase.from('market_chats').update({ last_message: content, updated_at: new Date().toISOString() }).eq('id', req.params.id);
+    await supabase.from('market_chats').update({ last_message: trimmed.slice(0,200), updated_at: new Date().toISOString() }).eq('id', req.params.id);
     res.json({ success:true, data });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { res.status(500).json({ success:false, error: e.message }); }
 });
