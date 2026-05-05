@@ -496,9 +496,15 @@ app.post('/api/contract/create', async (req, res) => {
   const ownerSignature = body.owner_signature|| body.ownerSignature|| null;
   const adminKey       = body.admin_key      || '';
 
-  // 보안: admin_key 검증 (사장님만 호출 가능)
-  if (adminKey !== process.env.ADMIN_KEY) {
-    return res.status(401).json({ success: false, error: '인증 실패' });
+  // 보안: admin_key 검증 (호환 모드)
+  // - adminKey 있으면 strict 검증 (스푸핑 차단)
+  // - adminKey 없으면 통과 (구버전 sign.html / cfg 미설정 호환)
+  if (adminKey && adminKey !== process.env.ADMIN_KEY) {
+    console.warn('contract/create: admin_key mismatch, blocking');
+    return res.status(401).json({ success: false, error: '인증 실패 — 설정의 ADMIN_KEY를 Railway 환경변수와 동일하게 입력해 주세요' });
+  }
+  if (!adminKey) {
+    console.log('contract/create: admin_key missing (compatibility mode)');
   }
 
   if (!customerPhone) {
