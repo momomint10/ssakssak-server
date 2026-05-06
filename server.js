@@ -2,9 +2,21 @@ const express = require('express');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const webpush = require('web-push');
+const helmet = require('helmet');
 const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
+
+// ── 보안 헤더 (Helmet) ──────────────────────────────────────
+// X-Content-Type-Options, X-Frame-Options, HSTS 등 자동 적용.
+// CSP는 차후 점진 도입 (외부 CDN 검토 필요).
+// COEP/CORP는 GitHub Pages frontend ↔ Railway backend cross-origin 호환 위해 완화.
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  crossOriginEmbedderPolicy: false,
+  crossOriginOpenerPolicy: false
+}));
 
 // ── CORS 화이트리스트 (패치 C) ──────────────────────────────
 // 운영 도메인만 허용. 개발 시 origin 추가 또는 ALLOW_ALL_ORIGINS=1 환경변수로 우회
