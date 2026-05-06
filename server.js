@@ -1228,6 +1228,23 @@ app.post('/api/booking/token', async (req, res) => {
         if (cErr) console.warn('booking_tokens cleanup error:', cErr.message);
       });
 
+    // 만료된 미서명 계약서 자동 정리 (서명 완료된 것은 보존)
+    supabase.from('pending_contracts').delete()
+      .lt('expires_at', new Date().toISOString())
+      .eq('status', 'pending')
+      .then(({ error: cErr }) => {
+        if (cErr) console.warn('pending_contracts cleanup error:', cErr.message);
+      });
+
+    // 30일 이상된 sent/cancelled reminders 자동 정리 (성공/취소 기록만 정리)
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000).toISOString();
+    supabase.from('pending_reminders').delete()
+      .in('status', ['sent', 'cancelled'])
+      .lt('created_at', thirtyDaysAgo)
+      .then(({ error: cErr }) => {
+        if (cErr) console.warn('pending_reminders cleanup error:', cErr.message);
+      });
+
     // 만료 리마인더 자동 발송 (피기백: cron 없어도 견적 발송할 때마다 처리)
     _processReminders().catch(() => null);
 
