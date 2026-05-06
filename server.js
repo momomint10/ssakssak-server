@@ -1220,6 +1220,14 @@ app.post('/api/booking/token', async (req, res) => {
     const { error } = await supabase.from('booking_tokens').insert([{ token, quote_data }]);
     if (error) throw error;
 
+    // 만료 토큰 자동 정리 (DB 비대 방지) — fire-and-forget, 응답 차단 안 함
+    supabase.from('booking_tokens').delete()
+      .lt('expires_at', new Date().toISOString())
+      .not('expires_at', 'is', null)  // null=영구 토큰 보존
+      .then(({ error: cErr }) => {
+        if (cErr) console.warn('booking_tokens cleanup error:', cErr.message);
+      });
+
     res.json({ success: true, token, url: `https://ssakapp.co.kr/b/?t=${token}` });
   } catch (e) {
     console.error('booking token POST error:', e);
