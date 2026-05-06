@@ -158,7 +158,7 @@ app.post('/api/subscribe', async (req, res) => {
   const { company_name, phone, email, plan } = req.body;
 
   if (!company_name || !phone) {
-    return res.status(400).json({ error: '업체명과 연락처는 필수입니다' });
+    return res.status(400).json({ success: false, error: '업체명과 연락처는 필수입니다' });
   }
 
   try {
@@ -206,7 +206,7 @@ app.post('/api/subscribe', async (req, res) => {
 
   } catch (err) {
     console.error('구독 신청 오류:', err);
-    res.status(500).json({ error: '서버 오류가 발생했습니다' });
+    res.status(500).json({ success: false, error: '서버 오류가 발생했습니다' });
   }
 });
 
@@ -214,7 +214,7 @@ app.post('/api/subscribe', async (req, res) => {
 app.get('/api/subscribers', async (req, res) => {
   const adminKey = req.headers['x-admin-key'];
   if (adminKey !== process.env.ADMIN_KEY) {
-    return res.status(401).json({ error: '인증 실패' });
+    return res.status(401).json({ success: false, error: '인증 실패' });
   }
 
   try {
@@ -228,7 +228,7 @@ app.get('/api/subscribers', async (req, res) => {
 
   } catch (err) {
     console.error('구독자 조회 오류:', err);
-    res.status(500).json({ error: '서버 오류' });
+    res.status(500).json({ success: false, error: '서버 오류' });
   }
 });
 
@@ -236,7 +236,7 @@ app.get('/api/subscribers', async (req, res) => {
 app.put('/api/subscribers/:id/status', async (req, res) => {
   const adminKey = req.headers['x-admin-key'];
   if (adminKey !== process.env.ADMIN_KEY) {
-    return res.status(401).json({ error: '인증 실패' });
+    return res.status(401).json({ success: false, error: '인증 실패' });
   }
 
   const { id } = req.params;
@@ -244,7 +244,7 @@ app.put('/api/subscribers/:id/status', async (req, res) => {
 
   const validStatuses = ['pending', 'active', 'paused', 'cancelled'];
   if (!validStatuses.includes(status)) {
-    return res.status(400).json({ error: '유효하지 않은 상태값입니다' });
+    return res.status(400).json({ success: false, error: '유효하지 않은 상태값입니다' });
   }
 
   try {
@@ -260,7 +260,7 @@ app.put('/api/subscribers/:id/status', async (req, res) => {
 
   } catch (err) {
     console.error('상태 변경 오류:', err);
-    res.status(500).json({ error: '서버 오류' });
+    res.status(500).json({ success: false, error: '서버 오류' });
   }
 });
 
@@ -280,7 +280,7 @@ app.get('/api/settings/:id', async (req, res) => {
 
   } catch (err) {
     console.error('설정 조회 오류:', err);
-    res.status(500).json({ error: '서버 오류' });
+    res.status(500).json({ success: false, error: '서버 오류' });
   }
 });
 
@@ -302,7 +302,7 @@ app.put('/api/settings/:id', async (req, res) => {
 
   } catch (err) {
     console.error('설정 업데이트 오류:', err);
-    res.status(500).json({ error: '서버 오류' });
+    res.status(500).json({ success: false, error: '서버 오류' });
   }
 });
 
@@ -320,7 +320,7 @@ app.get('/api/workforce', async (req, res) => {
 
   } catch (err) {
     console.error('인력 풀 조회 오류:', err);
-    res.status(500).json({ error: '서버 오류' });
+    res.status(500).json({ success: false, error: '서버 오류' });
   }
 });
 
@@ -328,7 +328,7 @@ app.get('/api/workforce', async (req, res) => {
 app.get('/api/stats', async (req, res) => {
   const adminKey = req.headers['x-admin-key'];
   if (adminKey !== process.env.ADMIN_KEY) {
-    return res.status(401).json({ error: '인증 실패' });
+    return res.status(401).json({ success: false, error: '인증 실패' });
   }
 
   try {
@@ -349,7 +349,7 @@ app.get('/api/stats', async (req, res) => {
 
   } catch (err) {
     console.error('통계 조회 오류:', err);
-    res.status(500).json({ error: '서버 오류' });
+    res.status(500).json({ success: false, error: '서버 오류' });
   }
 });
 
@@ -363,10 +363,10 @@ app.post('/api/sms/send', async (req, res) => {
   const from = process.env.COOLSMS_FROM;
 
   if (!apiKey || !apiSecret || !from) {
-    return res.status(500).json({ error: 'SMS API가 설정되지 않았습니다.' });
+    return res.status(500).json({ success: false, error: 'SMS API가 설정되지 않았습니다.' });
   }
   if (!to || !msg) {
-    return res.status(400).json({ error: '수신번호와 메시지는 필수입니다' });
+    return res.status(400).json({ success: false, error: '수신번호와 메시지는 필수입니다' });
   }
 
   try {
@@ -407,12 +407,12 @@ app.post('/api/sms/send', async (req, res) => {
       res.json({ success: true, message: '발송 완료', type: msgType });
     } else {
       console.error('SMS 발송 실패:', data);
-      res.status(400).json({ error: data.errorMessage || '발송 실패' });
+      res.status(400).json({ success: false, error: data.errorMessage || '발송 실패' });
     }
 
   } catch (err) {
     console.error('SMS 발송 오류:', err);
-    res.status(500).json({ error: '서버 오류가 발생했습니다' });
+    res.status(500).json({ success: false, error: '서버 오류가 발생했습니다' });
   }
 });
 
@@ -450,7 +450,7 @@ app.post('/api/contract/upload', async (req, res) => {
   const { pdfBase64, customerPhone, ownerPhone, customerName, companyName, companyPhone } = req.body;
 
   if (!pdfBase64 || !customerPhone) {
-    return res.status(400).json({ error: '필수 데이터가 없습니다' });
+    return res.status(400).json({ success: false, error: '필수 데이터가 없습니다' });
   }
 
   try {
@@ -491,7 +491,7 @@ app.post('/api/contract/upload', async (req, res) => {
 
   } catch (err) {
     console.error('계약서 업로드 오류:', err);
-    res.status(500).json({ error: '서버 오류: ' + err.message });
+    res.status(500).json({ success: false, error: '서버 오류: ' + err.message });
   }
 });
 
@@ -520,7 +520,7 @@ app.post('/api/contract/create', async (req, res) => {
   }
 
   if (!customerPhone) {
-    return res.status(400).json({ error: '고객 연락처가 없습니다' });
+    return res.status(400).json({ success: false, error: '고객 연락처가 없습니다' });
   }
 
   // contract_data 구성 (개별 필드 → 통합 객체)
@@ -569,7 +569,7 @@ app.post('/api/contract/create', async (req, res) => {
     res.json({ success: true, token, signUrl });
   } catch (err) {
     console.error('계약서 생성 오류:', err);
-    res.status(500).json({ error: '서버 오류: ' + err.message });
+    res.status(500).json({ success: false, error: '서버 오류: ' + err.message });
   }
 });
 
@@ -578,11 +578,11 @@ app.get('/api/contract/:token', async (req, res) => {
   const { token } = req.params;
   try {
     const { data, error } = await supabase.from('pending_contracts').select('*').eq('token', token).single();
-    if (error || !data) return res.status(404).json({ error: '계약서를 찾을 수 없습니다' });
-    if (new Date(data.expires_at) < new Date()) return res.status(410).json({ error: '만료된 계약서입니다' });
+    if (error || !data) return res.status(404).json({ success: false, error: '계약서를 찾을 수 없습니다' });
+    if (new Date(data.expires_at) < new Date()) return res.status(410).json({ success: false, error: '만료된 계약서입니다' });
     res.json({ success: true, data });
   } catch (err) {
-    res.status(500).json({ error: '서버 오류' });
+    res.status(500).json({ success: false, error: '서버 오류' });
   }
 });
 
@@ -590,12 +590,12 @@ app.get('/api/contract/:token', async (req, res) => {
 app.post('/api/contract/:token/sign', async (req, res) => {
   const { token } = req.params;
   const { customerSignature, pdfBase64 } = req.body;
-  if (!customerSignature) return res.status(400).json({ error: '서명이 없습니다' });
+  if (!customerSignature) return res.status(400).json({ success: false, error: '서명이 없습니다' });
 
   try {
     const { data: contract, error } = await supabase.from('pending_contracts').select('*').eq('token', token).single();
-    if (error || !contract) return res.status(404).json({ error: '계약서를 찾을 수 없습니다' });
-    if (contract.status === 'completed') return res.status(400).json({ error: '이미 서명된 계약서입니다' });
+    if (error || !contract) return res.status(404).json({ success: false, error: '계약서를 찾을 수 없습니다' });
+    if (contract.status === 'completed') return res.status(400).json({ success: false, error: '이미 서명된 계약서입니다' });
 
     const cd = contract.contract_data;
     let pdfUrl = null;
@@ -636,7 +636,7 @@ app.post('/api/contract/:token/sign', async (req, res) => {
     res.json({ success: true, pdfUrl });
   } catch (err) {
     console.error('서명 완료 오류:', err);
-    res.status(500).json({ error: '서버 오류: ' + err.message });
+    res.status(500).json({ success: false, error: '서버 오류: ' + err.message });
   }
 });
 
@@ -1184,7 +1184,7 @@ app.put('/api/bookings/:id/status', async (req, res) => {
     res.json({ success: true, data });
 
   } catch (err) {
-    res.status(500).json({ error: '서버 오류' });
+    res.status(500).json({ success: false, error: '서버 오류' });
   }
 });
 
@@ -1267,7 +1267,7 @@ app.get('/api/workers', async (req, res) => {
     const { data, error } = await q;
     if (error) throw error;
     res.json({ success:true, data: data||[] });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 // 내 프로필 조회
@@ -1276,7 +1276,7 @@ app.get('/api/workers/my/:anon_id', async (req, res) => {
     const { data, error } = await supabase.from('worker_profiles').select('*').eq('anon_id', req.params.anon_id).maybeSingle();
     if (error) throw error;
     res.json({ success:true, data: data||null });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 // 프로필 등록/수정 (upsert) — 입력 검증 강화
@@ -1884,7 +1884,7 @@ app.get('/api/market/listings', async (req, res) => {
     const { data, error, count } = await q;
     if (error) throw error;
     res.json({ success:true, data: data||[], total: count||0, hasMore: (page+1)*limit < (count||0) });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 // 내 목록
@@ -1894,7 +1894,7 @@ app.get('/api/market/listings/mine', async (req, res) => {
     const { data, error } = await supabase.from('market_listings').select('*').eq('anon_id', anon_id).neq('status','deleted').order('created_at',{ascending:false});
     if (error) throw error;
     res.json({ success:true, data: data||[] });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 // 상세 조회 + 조회수 증가 (jobs 사고 패턴 fix: maybeSingle + deleted 제외 + 404)
@@ -1944,7 +1944,7 @@ app.patch('/api/market/listings/:id/status', async (req, res) => {
     const { error } = await supabase.from('market_listings').update({ status }).eq('id', req.params.id).eq('anon_id', anon_id);
     if (error) throw error;
     res.json({ success:true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 // 삭제
@@ -1954,18 +1954,18 @@ app.delete('/api/market/listings/:id', async (req, res) => {
     const { error } = await supabase.from('market_listings').update({ status:'deleted' }).eq('id', req.params.id).eq('anon_id', anon_id);
     if (error) throw error;
     res.json({ success:true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 // 채팅방 목록
 app.get('/api/market/chats', async (req, res) => {
   try {
     const { anon_id } = req.query;
-    if (!anon_id) return res.status(400).json({ error: 'anon_id 필요' });
+    if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필요' });
     const { data, error } = await supabase.from('market_chats').select('*, listing:market_listings(title,image_url,price)').or(`buyer_anon_id.eq.${anon_id},seller_anon_id.eq.${anon_id}`).order('updated_at',{ascending:false});
     if (error) throw error;
     res.json({ success:true, data: data||[] });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+  } catch(e) { res.status(500).json({ success: false, error: e.message }); }
 });
 
 // 채팅 메시지 조회 (본인 참여 검증)
