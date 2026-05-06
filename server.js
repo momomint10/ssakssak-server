@@ -1279,27 +1279,64 @@ app.get('/api/workers/my/:anon_id', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-// 프로필 등록/수정 (upsert)
+// 프로필 등록/수정 (upsert) — 입력 검증 강화
 app.post('/api/workers', async (req, res) => {
   try {
-    const body = req.body;
-    if (!body.anon_id) return res.status(400).json({ error: 'anon_id 필요' });
+    const body = req.body || {};
 
-    // DB에 저장할 허용 필드만 추출 (unknown 컬럼 에러 방지)
-    const allowed = ['anon_id','nickname','regions','skills','available_days',
-                     'available_times','experience','daily_rate','bio',
-                     'contact','avatar_emoji','status','photo_url'];
-    const profileData = {};
-    for (const k of allowed) {
-      if (body[k] !== undefined) profileData[k] = body[k];
+    // ── 입력 검증 ──
+    if (!validateAnonId(body.anon_id)) {
+      return res.status(400).json({ success: false, error: 'anon_id 형식 오류' });
     }
+
+    // 길이 제한 + trim
+    const nickname     = clampStr(body.nickname, 30).trim();
+    const bio          = clampStr(body.bio, 500).trim();
+    const contact      = clampStr(body.contact, 50).trim();
+    const experience   = clampStr(body.experience, 30).trim();
+    const avatar_emoji = clampStr(body.avatar_emoji, 5);
+
+    // daily_rate 검증 (음수/거대값 차단)
+    let daily_rate = null;
+    if (body.daily_rate !== undefined && body.daily_rate !== null && body.daily_rate !== '') {
+      daily_rate = parseInt(body.daily_rate, 10);
+      if (!Number.isFinite(daily_rate) || daily_rate < 0 || daily_rate > 9999999) {
+        return res.status(400).json({ success: false, error: '일당이 올바르지 않습니다' });
+      }
+    }
+
+    // 배열 검증 (길이 제한)
+    const regions         = Array.isArray(body.regions)         ? body.regions.slice(0, 20).map(r => clampStr(r, 30)) : [];
+    const skills          = Array.isArray(body.skills)          ? body.skills.slice(0, 20).map(s => clampStr(s, 30)) : [];
+    const available_days  = Array.isArray(body.available_days)  ? body.available_days.slice(0, 7).map(d => clampStr(d, 5)) : [];
+    const available_times = Array.isArray(body.available_times) ? body.available_times.slice(0, 5).map(t => clampStr(t, 10)) : [];
+
+    // status 화이트리스트
+    const status = ['active', 'inactive'].includes(body.status) ? body.status : undefined;
+
+    const profileData = {
+      anon_id: body.anon_id,
+      ...(nickname     && { nickname }),
+      ...(bio          && { bio }),
+      ...(contact      && { contact }),
+      ...(experience   && { experience }),
+      ...(avatar_emoji && { avatar_emoji }),
+      regions, skills, available_days, available_times,
+      ...(daily_rate !== null && { daily_rate }),
+      ...(status && { status }),
+    };
 
     // 사진 처리: base64 → Supabase Storage 업로드
     if (body.photoBase64) {
       try {
-        const imgBuffer = Buffer.from(body.photoBase64, 'base64');
-        const mime = body.photoMime || 'image/jpeg';
-        const ext  = mime.split('/')[1] || 'jpg';
+        // 사이즈 제한 (10MB)
+        if (typeof body.photoBase64 === 'string' && body.photoBase64.length > 14 * 1024 * 1024) {
+          return res.status(400).json({ success: false, error: '사진이 너무 큽니다 (10MB 이하)' });
+        }
+        const cleaned = String(body.photoBase64).replace(/^data:image\/\w+;base64,/, '');
+        const imgBuffer = Buffer.from(cleaned, 'base64');
+        const mime = (typeof body.photoMime === 'string' && /^image\/(png|jpe?g|webp|gif)$/.test(body.photoMime)) ? body.photoMime : 'image/jpeg';
+        const ext  = mime.split('/')[1].replace('jpeg', 'jpg');
         const fileName = `workers/${body.anon_id}_${Date.now()}.${ext}`;
         const { error: upErr } = await supabase.storage
           .from('ssak-contracts')
@@ -1315,6 +1352,15 @@ app.post('/api/workers', async (req, res) => {
       } catch(photoErr) {
         console.error('사진 처리 오류:', photoErr.message);
       }
+    } else if (body.photo_url && typeof body.photo_url === 'string') {
+      // 직접 photo_url 전달 시 — 우리 Storage URL만 허용 (SSRF 방어)
+      try {
+        const url = new URL(body.photo_url);
+        if (url.hostname.endsWith('.supabase.co') || url.hostname.endsWith('supabase.co') || url.hostname === 'ssakapp.co.kr') {
+          profileData.photo_url = body.photo_url;
+        }
+        // 외부 URL은 무시
+      } catch(e) { /* 잘못된 URL 무시 */ }
     }
 
     profileData.updated_at = new Date().toISOString();
@@ -1323,8 +1369,11 @@ app.post('/api/workers', async (req, res) => {
       .upsert(profileData, { onConflict: 'anon_id' })
       .select().single();
     if (error) throw error;
-    res.json({ success:true, data });
-  } catch(e) { res.status(500).json({ error: e.message }); }
+    res.json({ success: true, data });
+  } catch(e) {
+    console.error('workers POST error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
 // 워커 상세 조회
