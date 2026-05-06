@@ -1081,17 +1081,24 @@ app.delete('/api/push/subscribe', async (req, res) => {
 // ── 예약 신청 접수 ─────────────────────────────────────────────────────────
 app.post('/api/booking', async (req, res) => {
   try {
-    const { name, phone, addr, size, type, date, time, notes, ownerPhone, apiKey, apiSecret, fromPhone, company } = req.body;
+    // ⚠️ 보안: 클라이언트 apiKey/apiSecret 무시 (환경변수 기반 sendSMSUtil 사용)
+    const { name, phone, addr, size, type, date, time, notes, ownerPhone } = req.body;
     if (!name || !phone) return res.status(400).json({ success: false, error: '이름과 연락처는 필수입니다.' });
 
+    // 입력 길이 검증
+    const cleanName = String(name).trim().slice(0, 30);
+    const cleanPhone = String(phone).replace(/[^0-9]/g, '').slice(0, 15);
+    if (!cleanName || cleanPhone.length < 8) return res.status(400).json({ success: false, error: '이름/연락처가 올바르지 않습니다.' });
+
     const bookingData = {
-      name, phone,
-      addr: addr || '',
-      size: size || '',
-      type: type || '입주 전 청소',
-      date: date || '',
-      time: time || '',
-      notes: notes || '',
+      name: cleanName,
+      phone: cleanPhone,
+      addr: String(addr || '').slice(0, 200),
+      size: String(size || '').slice(0, 10),
+      type: String(type || '입주 전 청소').slice(0, 30),
+      date: String(date || '').slice(0, 20),
+      time: String(time || '').slice(0, 20),
+      notes: String(notes || '').slice(0, 500),
       status: 'pending',
       created_at: new Date().toISOString()
     };
@@ -1099,21 +1106,17 @@ app.post('/api/booking', async (req, res) => {
     const { data, error } = await supabase.from('bookings').insert([bookingData]).select().single();
     if (error) throw error;
 
-    // 업주에게 SMS 알림 (설정된 경우)
-    if (ownerPhone && apiKey && apiSecret && fromPhone) {
-      try {
-        const msg = `[싹싹] 새 예약신청이 왔습니다!\n고객: ${name} (${phone})\n날짜: ${date} ${time}\n유형: ${type} ${size}평\n주소: ${addr}\n앱에서 확인하세요.`;
-        const timestamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14);
-        const salt = Math.random().toString(36).substr(2, 16);
-        const hmacStr = timestamp + salt;
-        const crypto = require('crypto');
-        const signature = crypto.createHmac('sha256', apiSecret).update(hmacStr).digest('hex');
-        await fetch('https://api.coolsms.co.kr/messages/v4/send', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': `HMAC-SHA256 apiKey=${apiKey}, date=${timestamp}, salt=${salt}, signature=${signature}` },
-          body: JSON.stringify({ message: { to: ownerPhone, from: fromPhone, text: msg } })
-        });
-      } catch(smsErr) { console.log('SMS 알림 실패(무시):', smsErr.message); }
+    // 사장님에게 SMS 알림 (서버 환경변수 사용 — 클라이언트 키 노출 차단)
+    if (ownerPhone) {
+      const cleanOwner = String(ownerPhone).replace(/[^0-9]/g, '');
+      if (cleanOwner.length >= 8) {
+        const msg = `[싹싹] 새 예약신청이 왔습니다!\n고객: ${cleanName} (${cleanPhone})\n날짜: ${bookingData.date} ${bookingData.time}\n유형: ${bookingData.type} ${bookingData.size}평\n주소: ${bookingData.addr}\n앱에서 확인하세요.`;
+        try {
+          await sendSMSUtil(cleanOwner, msg, '[싹싹] 새 예약신청');
+        } catch(smsErr) {
+          console.log('SMS 알림 실패(무시):', smsErr.message);
+        }
+      }
     }
 
     res.json({ success: true, data });
