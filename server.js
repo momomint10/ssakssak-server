@@ -1433,6 +1433,135 @@ app.post('/api/reminders/process', async (req, res) => {
 });
 
 
+// ──────────────────────────────────────────────────────────────
+// 🩺 서버 상태 진단 (모바일에서 한 번 열기 편하게 HTML 응답)
+// 환경변수 값은 노출 안 함 (set/missing만)
+// ──────────────────────────────────────────────────────────────
+app.get('/api/_status', async (req, res) => {
+  const ENV_KEYS = [
+    'ADMIN_KEY', 'COOLSMS_API_KEY', 'COOLSMS_API_SECRET', 'COOLSMS_FROM',
+    'VAPID_PUBLIC_KEY', 'VAPID_PRIVATE_KEY', 'VAPID_SUBJECT',
+    'SUPABASE_URL', 'SUPABASE_SERVICE_KEY'
+  ];
+  const envCheck = {};
+  ENV_KEYS.forEach(k => { envCheck[k] = !!process.env[k] ? '✅ set' : '❌ missing'; });
+
+  // uptime
+  const sec = Math.floor(process.uptime());
+  const uptimeStr = sec < 60 ? sec + 's' :
+    sec < 3600 ? Math.floor(sec/60) + 'm ' + (sec%60) + 's' :
+    Math.floor(sec/3600) + 'h ' + Math.floor((sec%3600)/60) + 'm';
+
+  // DB 상태 + 카운트
+  let dbStatus = '✅ connected';
+  const counts = {};
+  const lastSeen = {};
+  const tables = [
+    { name: 'bookings', label: '📅 예약 신청' },
+    { name: 'booking_tokens', label: '🪙 단축 URL 토큰' },
+    { name: 'pending_contracts', label: '📋 계약서' },
+    { name: 'pending_reminders', label: '⏰ 예약 발송' },
+    { name: 'worker_profiles', label: '👥 워커' },
+    { name: 'community_posts', label: '📰 커뮤니티 글' },
+    { name: 'market_listings', label: '🛒 중고거래' },
+    { name: 'push_subscriptions', label: '🔔 푸시 구독' }
+  ];
+  try {
+    for (const t of tables) {
+      try {
+        const { count } = await supabase.from(t.name).select('*', { count: 'exact', head: true });
+        counts[t.label] = count || 0;
+        // 최근 created_at
+        const { data: latest } = await supabase.from(t.name)
+          .select('created_at').order('created_at', { ascending: false }).limit(1).maybeSingle();
+        lastSeen[t.label] = latest?.created_at || null;
+      } catch (e) {
+        counts[t.label] = 'ERR';
+        lastSeen[t.label] = null;
+      }
+    }
+  } catch (e) {
+    dbStatus = '❌ error: ' + e.message;
+  }
+
+  // CoolSMS 환경변수 모두 set인지
+  const smsReady = envCheck.COOLSMS_API_KEY === '✅ set' &&
+                   envCheck.COOLSMS_API_SECRET === '✅ set' &&
+                   envCheck.COOLSMS_FROM === '✅ set';
+
+  // HTML 응답
+  const fmtTime = (t) => t ? new Date(t).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' }) : '없음';
+  const envRows = ENV_KEYS.map(k => `<tr><td>${k}</td><td>${envCheck[k]}</td></tr>`).join('');
+  const tableRows = tables.map(t => `<tr><td>${t.label}</td><td>${counts[t.label]}</td><td>${fmtTime(lastSeen[t.label])}</td></tr>`).join('');
+
+  res.type('html').send(`<!DOCTYPE html>
+<html lang="ko"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>서버 진단</title>
+<style>
+*{box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,'Apple SD Gothic Neo',sans-serif;}
+body{margin:0;padding:16px;background:#f5f7fa;color:#1a1f36;font-size:14px;line-height:1.6;}
+h1{font-size:20px;margin:0 0 16px;color:#00C896;}
+h2{font-size:15px;margin:20px 0 8px;color:#1a1f36;border-bottom:2px solid #e0e6ed;padding-bottom:6px;}
+.card{background:#fff;border-radius:12px;padding:14px 16px;margin-bottom:12px;box-shadow:0 1px 4px rgba(0,0,0,.06);}
+.big{font-size:16px;font-weight:600;}
+.green{color:#00C896;}
+.red{color:#FF3B30;}
+table{width:100%;border-collapse:collapse;font-size:13px;}
+th,td{padding:6px 4px;text-align:left;border-bottom:1px solid #f0f0f0;}
+th{font-weight:600;color:#6b7684;}
+.summary{display:flex;justify-content:space-between;margin:6px 0;}
+.summary-key{color:#6b7684;}
+.summary-val{font-weight:600;}
+.warn{background:#FFF7E6;border:1px solid #FFD591;color:#B45309;padding:10px 12px;border-radius:10px;margin-bottom:12px;font-size:13px;}
+.ok{background:#E6FAF5;border:1px solid #00C896;color:#00A87A;padding:10px 12px;border-radius:10px;margin-bottom:12px;font-size:13px;}
+</style>
+</head><body>
+<h1>🩺 싹싹 서버 진단</h1>
+
+${smsReady ? '<div class="ok">✅ CoolSMS 환경변수 모두 등록됨 — SMS 발송 준비 완료</div>' : '<div class="warn">⚠️ CoolSMS 환경변수 누락 — Railway Variables에서 등록 필요</div>'}
+
+<div class="card">
+  <h2>⚙️ 서버 상태</h2>
+  <div class="summary"><span class="summary-key">서버 가동 시간</span><span class="summary-val big">${uptimeStr}</span></div>
+  <div class="summary"><span class="summary-key">DB 연결</span><span class="summary-val ${dbStatus.startsWith('✅')?'green':'red'}">${dbStatus}</span></div>
+  <div class="summary"><span class="summary-key">현재 시각 (KST)</span><span class="summary-val">${new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })}</span></div>
+</div>
+
+<div class="card">
+  <h2>🔑 환경변수 등록 여부</h2>
+  <table>
+    <tr><th>변수명</th><th>상태</th></tr>
+    ${envRows}
+  </table>
+  <div style="font-size:11.5px;color:#6b7684;margin-top:8px;">💡 missing 항목이 있으면 Railway → Variables에서 추가하세요. 값은 보안상 노출되지 않습니다.</div>
+</div>
+
+<div class="card">
+  <h2>📊 DB 데이터 현황</h2>
+  <table>
+    <tr><th>테이블</th><th>건수</th><th>최근 활동 (KST)</th></tr>
+    ${tableRows}
+  </table>
+</div>
+
+<div class="card">
+  <h2>📝 진단 가이드</h2>
+  <ul style="padding-left:18px;margin:8px 0;">
+    <li><b>예약 신청 후 SMS 안 옴</b>: COOLSMS_* 3개 모두 ✅ set 인지 확인</li>
+    <li><b>'유효하지 않은 링크'</b>: SUPABASE_* 2개 ✅ set인지 + DB connected 확인</li>
+    <li><b>'인증 실패'</b>: ADMIN_KEY ✅ set인지 + 사장님 cfg.adminKey와 일치 확인</li>
+    <li><b>예약 신청 0건</b>: bookings 최근 활동 시각 확인 (오늘이면 정상)</li>
+  </ul>
+</div>
+
+<div style="text-align:center;font-size:11px;color:#a0a8b8;margin:20px 0;">
+  싹싹 서버 진단 페이지 · 새로고침하면 최신 상태 확인
+</div>
+</body></html>`);
+});
+
 // 서버 시작
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
