@@ -1228,6 +1228,9 @@ app.post('/api/booking/token', async (req, res) => {
         if (cErr) console.warn('booking_tokens cleanup error:', cErr.message);
       });
 
+    // 만료 리마인더 자동 발송 (피기백: cron 없어도 견적 발송할 때마다 처리)
+    _processReminders().catch(() => null);
+
     res.json({ success: true, token, url: `https://ssakapp.co.kr/b/?t=${token}` });
   } catch (e) {
     console.error('booking token POST error:', e);
@@ -1253,6 +1256,149 @@ app.get('/api/booking/token/:token', async (req, res) => {
     res.status(500).json({ success: false, error: e.message });
   }
 });
+
+// ──────────────────────────────────────────────────────────────
+// 📅 자동 Follow-up (Reminders)
+// 견적 발송 후 24시간 미응답 시 자동 리마인드 SMS 시스템
+// ──────────────────────────────────────────────────────────────
+
+// 리마인더 자동 발송 처리 (만료된 scheduled 항목들 → SMS 발송)
+async function _processReminders() {
+  try {
+    const now = new Date().toISOString();
+    const { data, error } = await supabase.from('pending_reminders')
+      .select('*')
+      .eq('status', 'scheduled')
+      .lte('send_at', now)
+      .limit(20);
+    if (error || !data || !data.length) return { sent: 0 };
+
+    let sent = 0;
+    for (const r of data) {
+      try {
+        // 이미 고객이 예약 신청했는지 체크 (해당 phone으로 booking이 있으면 skip)
+        const { data: existing } = await supabase.from('bookings')
+          .select('id').eq('phone', r.customer_phone)
+          .gte('created_at', new Date(r.created_at).toISOString())
+          .limit(1).maybeSingle();
+        if (existing) {
+          // 이미 예약 들어옴 → 리마인드 스킵
+          await supabase.from('pending_reminders').update({ status: 'cancelled', sent_at: now }).eq('id', r.id);
+          continue;
+        }
+        // 발송
+        const result = await sendSMSUtil(r.customer_phone, r.message, '[싹싹] 견적 안내');
+        await supabase.from('pending_reminders').update({
+          status: result.ok ? 'sent' : 'cancelled',
+          sent_at: now
+        }).eq('id', r.id);
+        if (result.ok) sent++;
+      } catch (e) {
+        console.warn('reminder process item error:', e.message);
+      }
+    }
+    return { sent };
+  } catch (e) {
+    console.error('_processReminders error:', e);
+    return { sent: 0, error: e.message };
+  }
+}
+
+// POST /api/reminders — 새 리마인더 예약 (사장님 인증)
+app.post('/api/reminders', async (req, res) => {
+  try {
+    const adminKey = req.headers['x-admin-key'] || req.body.adminKey || '';
+    if (adminKey && adminKey !== process.env.ADMIN_KEY) {
+      return res.status(401).json({ success: false, error: '인증 실패' });
+    }
+    const { anon_id, customer_phone, customer_name, message, hours_later, source_type, source_ref } = req.body || {};
+    if (!validateAnonId(anon_id)) return res.status(400).json({ success: false, error: 'anon_id 필수' });
+    if (!customer_phone || customer_phone.length < 8) return res.status(400).json({ success: false, error: '고객 연락처 필수' });
+    if (!message || message.length > 500) return res.status(400).json({ success: false, error: '메시지 형식 오류' });
+    const hours = parseInt(hours_later, 10);
+    if (!Number.isFinite(hours) || hours < 1 || hours > 168) return res.status(400).json({ success: false, error: 'hours_later 1-168' });
+
+    const sendAt = new Date(Date.now() + hours * 3600000).toISOString();
+    const { data, error } = await supabase.from('pending_reminders').insert([{
+      anon_id,
+      customer_phone: String(customer_phone).replace(/[^0-9]/g, ''),
+      customer_name: clampStr(customer_name || '', 30),
+      message: clampStr(message, 500),
+      send_at: sendAt,
+      source_type: clampStr(source_type || 'quote', 30),
+      source_ref: clampStr(source_ref || '', 100)
+    }]).select().single();
+    if (error) throw error;
+
+    // piggyback: 만료된 리마인더 처리
+    _processReminders().catch(() => null);
+
+    res.json({ success: true, data });
+  } catch (e) {
+    console.error('reminders POST error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// GET /api/reminders — 본인 리마인더 목록 (사장님 인증)
+app.get('/api/reminders', async (req, res) => {
+  try {
+    const adminKey = req.headers['x-admin-key'] || req.query.adminKey || '';
+    if (adminKey && adminKey !== process.env.ADMIN_KEY) {
+      return res.status(401).json({ success: false, error: '인증 실패' });
+    }
+    const { anon_id } = req.query;
+    if (!validateAnonId(anon_id)) return res.status(400).json({ success: false, error: 'anon_id 필수' });
+    const status = req.query.status || 'scheduled';
+    const { data, error } = await supabase.from('pending_reminders')
+      .select('*').eq('anon_id', anon_id).eq('status', status)
+      .order('send_at', { ascending: true });
+    if (error) throw error;
+    res.json({ success: true, data: data || [] });
+  } catch (e) {
+    console.error('reminders GET error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// DELETE /api/reminders/:id — 리마인더 취소 (본인만)
+app.delete('/api/reminders/:id', async (req, res) => {
+  try {
+    const adminKey = req.headers['x-admin-key'] || req.query.adminKey || '';
+    if (adminKey && adminKey !== process.env.ADMIN_KEY) {
+      return res.status(401).json({ success: false, error: '인증 실패' });
+    }
+    const { anon_id } = req.body || req.query || {};
+    if (!validateAnonId(anon_id)) return res.status(400).json({ success: false, error: 'anon_id 필수' });
+    const { data, error } = await supabase.from('pending_reminders')
+      .update({ status: 'cancelled' })
+      .eq('id', req.params.id).eq('anon_id', anon_id).eq('status', 'scheduled')
+      .select().maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(403).json({ success: false, error: '본인 리마인더만 취소 가능' });
+    res.json({ success: true });
+  } catch (e) {
+    console.error('reminders DELETE error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// POST /api/reminders/process — 만료된 리마인더 일괄 처리 (cron 호출용)
+// 외부 cron-job.org 같은 서비스에서 매시간 호출 권장
+app.post('/api/reminders/process', async (req, res) => {
+  try {
+    const adminKey = req.headers['x-admin-key'] || req.body.adminKey || req.query.adminKey || '';
+    if (adminKey !== process.env.ADMIN_KEY) {
+      return res.status(401).json({ success: false, error: '인증 실패' });
+    }
+    const result = await _processReminders();
+    res.json({ success: true, ...result });
+  } catch (e) {
+    console.error('reminders process error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 
 // 서버 시작
 const PORT = process.env.PORT || 3000;
