@@ -577,7 +577,7 @@ app.post('/api/contract/create', async (req, res) => {
 app.get('/api/contract/:token', async (req, res) => {
   const { token } = req.params;
   try {
-    const { data, error } = await supabase.from('pending_contracts').select('*').eq('token', token).single();
+    const { data, error } = await supabase.from('pending_contracts').select('*').eq('token', token).maybeSingle();
     if (error || !data) return res.status(404).json({ success: false, error: '계약서를 찾을 수 없습니다' });
     if (new Date(data.expires_at) < new Date()) return res.status(410).json({ success: false, error: '만료된 계약서입니다' });
     res.json({ success: true, data });
@@ -593,7 +593,7 @@ app.post('/api/contract/:token/sign', async (req, res) => {
   if (!customerSignature) return res.status(400).json({ success: false, error: '서명이 없습니다' });
 
   try {
-    const { data: contract, error } = await supabase.from('pending_contracts').select('*').eq('token', token).single();
+    const { data: contract, error } = await supabase.from('pending_contracts').select('*').eq('token', token).maybeSingle();
     if (error || !contract) return res.status(404).json({ success: false, error: '계약서를 찾을 수 없습니다' });
     if (contract.status === 'completed') return res.status(400).json({ success: false, error: '이미 서명된 계약서입니다' });
 
@@ -968,7 +968,7 @@ app.post('/api/community/posts/:id/comments', async (req, res) => {
 
     // 글 존재 확인
     const { data: post } = await supabase.from('community_posts')
-      .select('id, comment_count, deleted').eq('id', id).single();
+      .select('id, comment_count, deleted').eq('id', id).maybeSingle();
     if (!post || post.deleted) return res.status(404).json({ success: false, error: '글을 찾을 수 없습니다' });
 
     // 댓글 INSERT
@@ -1008,7 +1008,7 @@ app.delete('/api/community/comments/:id', async (req, res) => {
     const { data: cmt, error: cErr } = await supabase.from('community_comments')
       .update({ deleted: true })
       .eq('id', id).eq('anon_id', anon_id)
-      .select('id, post_id').single();
+      .select('id, post_id').maybeSingle();
     if (cErr) throw cErr;
     if (!cmt) return res.status(403).json({ success: false, error: '본인 댓글만 삭제할 수 있습니다' });
 
