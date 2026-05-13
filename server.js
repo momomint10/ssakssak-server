@@ -7,6 +7,17 @@ const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 
+// ── 진단용 인-메모리 카운터 (서버 재시작 시 초기화) ──
+const _diagStats = {
+  bookingPostCount: 0,
+  bookingSuccessCount: 0,
+  bookingFailCount: 0,
+  lastBookingPostAt: null,
+  lastBookingSuccessAt: null,
+  lastBookingError: null,
+  serverStartedAt: new Date().toISOString()
+};
+
 // ── 보안 헤더 (Helmet) ──────────────────────────────────────
 // X-Content-Type-Options, X-Frame-Options, HSTS 등 자동 적용.
 // CSP는 차후 점진 도입 (외부 CDN 검토 필요).
@@ -1086,14 +1097,22 @@ app.post('/api/booking', async (req, res) => {
     // address ↔ addr 둘 다 호환 (booking.html은 address, 서버는 addr 사용해왔음)
     const addrInput = req.body?.addr || req.body?.address || '';
 
+    _diagStats.bookingPostCount++;
+    _diagStats.lastBookingPostAt = new Date().toISOString();
     console.log('booking POST:', { name, phone, hasAddr: !!addrInput, hasOwner: !!ownerPhone });
 
-    if (!name || !phone) return res.status(400).json({ success: false, error: '이름과 연락처는 필수입니다.' });
+    if (!name || !phone) {
+      _diagStats.bookingFailCount++;
+      _diagStats.lastBookingError = '이름/연락처 누락';
+      return res.status(400).json({ success: false, error: '이름과 연락처는 필수입니다.' });
+    }
 
     // 입력 길이 검증
     const cleanName = String(name).trim().slice(0, 30);
     const cleanPhone = String(phone).replace(/[^0-9]/g, '').slice(0, 15);
     if (!cleanName || cleanPhone.length < 8) {
+      _diagStats.bookingFailCount++;
+      _diagStats.lastBookingError = '검증 실패: name=' + cleanName + ', phone=' + cleanPhone;
       console.log('booking 검증 실패: name=', cleanName, 'phone=', cleanPhone);
       return res.status(400).json({ success: false, error: '이름/연락처가 올바르지 않습니다.' });
     }
@@ -1117,6 +1136,8 @@ app.post('/api/booking', async (req, res) => {
       throw error;
     }
 
+    _diagStats.bookingSuccessCount++;
+    _diagStats.lastBookingSuccessAt = new Date().toISOString();
     console.log('booking INSERT 성공:', data.id);
 
     // ⚡ 즉시 응답 (사용자 화면 빠르게 다음 단계로)
@@ -1137,6 +1158,8 @@ app.post('/api/booking', async (req, res) => {
       console.log('ownerPhone 미전달');
     }
   } catch (err) {
+    _diagStats.bookingFailCount++;
+    _diagStats.lastBookingError = err.message;
     console.error('booking error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
@@ -1446,6 +1469,13 @@ app.get('/api/_status', async (req, res) => {
   const envCheck = {};
   ENV_KEYS.forEach(k => { envCheck[k] = !!process.env[k] ? '✅ set' : '❌ missing'; });
 
+  // Railway 빌드 정보
+  const buildInfo = {
+    commit: process.env.RAILWAY_GIT_COMMIT_SHA || process.env.RAILWAY_GIT_BRANCH || '(unknown)',
+    deployId: process.env.RAILWAY_DEPLOYMENT_ID || '(unknown)',
+    serverStart: _diagStats.serverStartedAt
+  };
+
   // uptime
   const sec = Math.floor(process.uptime());
   const uptimeStr = sec < 60 ? sec + 's' :
@@ -1527,6 +1557,25 @@ ${smsReady ? '<div class="ok">✅ CoolSMS 환경변수 모두 등록됨 — SMS 
   <div class="summary"><span class="summary-key">서버 가동 시간</span><span class="summary-val big">${uptimeStr}</span></div>
   <div class="summary"><span class="summary-key">DB 연결</span><span class="summary-val ${dbStatus.startsWith('✅')?'green':'red'}">${dbStatus}</span></div>
   <div class="summary"><span class="summary-key">현재 시각 (KST)</span><span class="summary-val">${new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })}</span></div>
+  <div class="summary"><span class="summary-key">서버 시작</span><span class="summary-val" style="font-size:11px;">${new Date(buildInfo.serverStart).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' })}</span></div>
+</div>
+
+<div class="card">
+  <h2>🚂 Railway 빌드 정보</h2>
+  <div class="summary"><span class="summary-key">배포된 commit</span><span class="summary-val" style="font-family:monospace;font-size:11px;">${String(buildInfo.commit).slice(0,12)}</span></div>
+  <div class="summary"><span class="summary-key">배포 ID</span><span class="summary-val" style="font-family:monospace;font-size:11px;">${String(buildInfo.deployId).slice(0,16)}</span></div>
+  <div style="font-size:11.5px;color:#6b7684;margin-top:8px;">💡 GitHub 최신 commit과 다르면 Railway 자동 배포가 막혀있거나 빌드 실패. (unknown)이면 Railway 환경변수 미주입.</div>
+</div>
+
+<div class="card">
+  <h2>📥 예약 신청 시도 통계 (서버 시작 후)</h2>
+  <div class="summary"><span class="summary-key">총 시도 횟수</span><span class="summary-val big ${_diagStats.bookingPostCount === 0 ? 'red' : 'green'}">${_diagStats.bookingPostCount}</span></div>
+  <div class="summary"><span class="summary-key">성공</span><span class="summary-val green">${_diagStats.bookingSuccessCount}</span></div>
+  <div class="summary"><span class="summary-key">실패</span><span class="summary-val ${_diagStats.bookingFailCount === 0 ? '' : 'red'}">${_diagStats.bookingFailCount}</span></div>
+  <div class="summary"><span class="summary-key">마지막 시도</span><span class="summary-val" style="font-size:11px;">${_diagStats.lastBookingPostAt ? new Date(_diagStats.lastBookingPostAt).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' }) : '없음'}</span></div>
+  <div class="summary"><span class="summary-key">마지막 성공</span><span class="summary-val" style="font-size:11px;">${_diagStats.lastBookingSuccessAt ? new Date(_diagStats.lastBookingSuccessAt).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' }) : '없음'}</span></div>
+  ${_diagStats.lastBookingError ? '<div class="summary"><span class="summary-key">마지막 에러</span><span class="summary-val red" style="font-size:11px;">' + _diagStats.lastBookingError + '</span></div>' : ''}
+  <div style="font-size:11.5px;color:#6b7684;margin-top:8px;">💡 사장님이 booking 신청 후 이 페이지 새로고침해서 "총 시도 횟수"가 늘면 서버 도달 ✅. 안 늘면 서버 도달 X (캐시/CORS 등 클라이언트 문제).</div>
 </div>
 
 <div class="card">
