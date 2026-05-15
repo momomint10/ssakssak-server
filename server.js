@@ -116,6 +116,33 @@ if (PUSH_ENABLED) {
   console.log('⚠️  Web Push 비활성화 (VAPID 키 미설정)');
 }
 
+// 푸시 발송 헬퍼: 모든 push_subscriptions 에 발송 (소유자 알림용)
+// 테스트 단계라 사장님 1명 구독만 있다는 가정. 향후 owner_anon_id 필터 필요.
+async function sendPushToAll(payload) {
+  if (!PUSH_ENABLED) return { sent: 0, failed: 0 };
+  try {
+    const { data: subs, error } = await supabase.from('push_subscriptions').select('endpoint, p256dh, auth');
+    if (error || !subs || !subs.length) return { sent: 0, failed: 0 };
+    const json = JSON.stringify(payload);
+    let sent = 0, failed = 0;
+    const stale = [];
+    await Promise.allSettled(subs.map(async s => {
+      try {
+        await webpush.sendNotification({ endpoint: s.endpoint, keys: { p256dh: s.p256dh, auth: s.auth }}, json);
+        sent++;
+      } catch (err) {
+        failed++;
+        if (err.statusCode === 404 || err.statusCode === 410) stale.push(s.endpoint);
+      }
+    }));
+    if (stale.length) await supabase.from('push_subscriptions').delete().in('endpoint', stale);
+    return { sent, failed };
+  } catch (e) {
+    console.error('sendPushToAll error:', e.message);
+    return { sent: 0, failed: 0 };
+  }
+}
+
 // 푸시 발송 헬퍼: 특정 anon_id의 모든 구독으로 푸시 발송
 // 만료된 구독은 자동 제거 (410 Gone 에러)
 async function sendPushTo(anon_id, payload) {
@@ -658,6 +685,16 @@ app.post('/api/contract/:token/sign', async (req, res) => {
 
     if (customerPhone) await sendSMSUtil(customerPhone.replace(/-/g,''), customerMsg, `[${companyName}] 서명 완료`);
     if (companyPhone) await sendSMSUtil(companyPhone.replace(/-/g,''), ownerMsg, '계약서 서명 완료');
+
+    // Web Push 알림 (사장님이 앱 켜두면 즉시 알림 — SMS 보조)
+    // PUSH_ENABLED false면 자동 no-op. 실패해도 라우트 응답 차단 안 함.
+    sendPushToAll({
+      title: '📄 계약서 서명 완료',
+      body: `${customerName}님 (${customerPhone}) 서명이 완료됐어요`,
+      url: pdfUrl || 'https://ssakapp.co.kr/schedule.html',
+      icon: '/icon-192.png',
+      tag: `contract-${token}`,
+    }).catch(e => console.error('contract sign push error:', e.message));
 
     console.log(`계약서 서명 완료: ${token}`);
     res.json({ success: true, pdfUrl });
