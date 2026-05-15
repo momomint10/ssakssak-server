@@ -366,6 +366,17 @@ app.get('/api/stats', async (req, res) => {
 
 // ── SMS 발송 (CoolSMS) ────────────────────────
 app.post('/api/sms/send', async (req, res) => {
+  // ── 보안 강화: origin 검증 (curl/Postman 등 서버사이드 호출 차단) ──
+  // CORS 화이트리스트가 origin 없는 요청을 허용하므로 라우트 단에서 추가 검증.
+  // 브라우저는 origin 자동 설정 → 위조 불가. 서버사이드 호출자는 origin 없음 → 차단.
+  const origin = req.headers.origin || req.headers.referer || '';
+  const allowedHosts = ['ssakapp.co.kr', 'localhost', '127.0.0.1'];
+  const isAllowed = origin && allowedHosts.some(h => origin.includes(h));
+  if (!isAllowed) {
+    console.warn(`sms/send: blocked origin: ${origin || '(no-origin)'}`);
+    return res.status(403).json({ success: false, error: '허용되지 않은 출처에서 호출됐습니다.' });
+  }
+
   const { to, msg, subject } = req.body;
 
   // 환경변수에서 API 키 로드 (사용자에게 노출 안 됨)
