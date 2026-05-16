@@ -1844,27 +1844,80 @@ app.post('/api/quote-requests', authRequired, async (req, res) => {
       return res.status(400).json({ success: false, error: '고객 휴대폰 번호를 확인해 주세요' });
     }
     const customerName = clampStr(req.body.customer_name || '', 30);
-    const customMsg    = clampStr(req.body.message || '', 300);
+    const customMsg    = clampStr(req.body.message || '', 500);
     const companyName  = clampStr(req.body.company_name || '', 50);
+
+    // 사장님 안내 자료 (블로그/SNS/인사말 등)
+    // 각 필드 길이 제한 + URL 검증
+    const ownerInfoIn = req.body.owner_info && typeof req.body.owner_info === 'object' ? req.body.owner_info : {};
+    const safeUrl = (u) => {
+      if (!u || typeof u !== 'string') return '';
+      const s = u.trim().slice(0, 300);
+      if (!s) return '';
+      // http(s)://로 시작 안 하면 https:// 자동 보정
+      if (!/^https?:\/\//i.test(s)) return 'https://' + s;
+      return s;
+    };
+    const ownerInfo = {
+      company:        clampStr(ownerInfoIn.company   || companyName || '', 50),
+      phone:          clampStr(ownerInfoIn.phone     || '', 20),
+      intro:          clampStr(ownerInfoIn.intro     || '', 500),
+      blog_url:       safeUrl(ownerInfoIn.blog_url),
+      naver_url:      safeUrl(ownerInfoIn.naver_url),
+      kakao_url:      safeUrl(ownerInfoIn.kakao_url),
+      instagram_url:  safeUrl(ownerInfoIn.instagram_url),
+      review_url:     safeUrl(ownerInfoIn.review_url),
+      process_guide:  clampStr(ownerInfoIn.process_guide || '', 500)
+    };
+
     // 토큰 생성 (32자 hex — 계약서 토큰과 동일 강도)
     const token = require('crypto').randomBytes(16).toString('hex');
     const { data: inserted, error: insErr } = await supabase.from('quote_requests').insert({
       token,
       customer_phone: customerPhoneRaw,
       customer_name: customerName || null,
+      owner_info: ownerInfo,
       status: 'pending',
       created_by: req.user.id
-    }).select('id, token, customer_phone, customer_name, status, created_at, expires_at').maybeSingle();
+    }).select('id, token, customer_phone, customer_name, status, owner_info, created_at, expires_at').maybeSingle();
     if (insErr) {
       console.error('quote_requests insert error:', insErr.message);
       return res.status(500).json({ success: false, error: '요청 생성 실패' });
     }
-    // SMS 발송
+
+    // SMS 본문 자동 생성 — 사장님 자료 자동 포함
     const formUrl = `https://ssakapp.co.kr/quote.html?token=${token}`;
-    const defaultMsg = `안녕하세요${companyName ? ' ' + companyName : ''}입니다.\n정확한 견적을 위해 평수·사진을 알려주세요.\n${formUrl}\n(약 1분 소요)`;
+    // 안내 링크 1순위 (네이버 블로그 우선, 없으면 카카오, 인스타, 리뷰 순)
+    const promoUrl = ownerInfo.blog_url || ownerInfo.naver_url ||
+                     ownerInfo.kakao_url || ownerInfo.instagram_url || ownerInfo.review_url || '';
+    const promoLabel = ownerInfo.blog_url || ownerInfo.naver_url ? '🔗 업체 안내' :
+                       ownerInfo.kakao_url ? '💬 카카오' :
+                       ownerInfo.instagram_url ? '📷 인스타' :
+                       ownerInfo.review_url ? '⭐ 후기' : '';
+
+    const builtMsg = [
+      `[싹싹] ${ownerInfo.company || companyName || '청소 견적'}`,
+      ``,
+      `${customerName || '고객님'}, 안녕하세요!`,
+      `정확한 견적을 위해 평수·사진을 알려주세요.`,
+      ``,
+      `📝 정보 입력: ${formUrl}`,
+      `(약 2분 소요 — 첨부 자료가 페이지에서 확인됩니다)`,
+      promoUrl ? `\n${promoLabel}: ${promoUrl}` : '',
+      ownerInfo.phone ? `\n📞 문의: ${ownerInfo.phone}` : ''
+    ].filter(Boolean).join('\n').trim();
+
     const finalMsg = customMsg
-      ? customMsg.replace(/\{링크\}|\{url\}|\{URL\}/g, formUrl).replace(/\{이름\}/g, customerName || '고객님')
-      : defaultMsg;
+      ? customMsg
+          .replace(/\{링크\}|\{url\}|\{URL\}/g, formUrl)
+          .replace(/\{이름\}/g, customerName || '고객님')
+          .replace(/\{업체명\}/g, ownerInfo.company || companyName || '')
+          .replace(/\{전화\}/g, ownerInfo.phone || '')
+          .replace(/\{블로그\}/g, ownerInfo.blog_url || ownerInfo.naver_url || '')
+          .replace(/\{카카오\}/g, ownerInfo.kakao_url || '')
+          .replace(/\{인스타\}/g, ownerInfo.instagram_url || '')
+      : builtMsg;
+
     let smsResult = { ok: false };
     try {
       smsResult = await sendSMSUtil(customerPhoneRaw, finalMsg, ' ', {
@@ -1879,6 +1932,7 @@ app.post('/api/quote-requests', authRequired, async (req, res) => {
       success: true,
       data: inserted,
       url: formUrl,
+      sms_body: finalMsg,
       sms_sent: smsResult.ok || false,
       sms_error: smsResult.ok ? null : (smsResult.error || null)
     });
@@ -1894,7 +1948,7 @@ app.get('/api/quote-requests/by-token/:token', async (req, res) => {
     const { token } = req.params;
     if (!/^[a-f0-9]{32}$/.test(token)) return res.status(400).json({ success: false, error: '잘못된 링크' });
     const { data, error } = await supabase.from('quote_requests')
-      .select('id, token, status, customer_phone, customer_name, clean_type, housing_type, area_size, area_type, region, desired_date, notes, room_count, bathroom_count, veranda_count, site_conditions, appliance_options, aircon_info, referral_source, photos, final_quote_amount, expires_at, submitted_at, quoted_at')
+      .select('id, token, status, customer_phone, customer_name, clean_type, housing_type, area_size, area_type, region, desired_date, notes, room_count, bathroom_count, veranda_count, site_conditions, appliance_options, aircon_info, referral_source, owner_info, photos, final_quote_amount, expires_at, submitted_at, quoted_at')
       .eq('token', token).maybeSingle();
     if (error) return res.status(500).json({ success: false, error: error.message });
     if (!data)  return res.status(404).json({ success: false, error: '만료되었거나 존재하지 않는 링크입니다' });
@@ -2075,7 +2129,7 @@ app.get('/api/quote-requests', authRequired, async (req, res) => {
   try {
     const status = req.query.status && ['pending','submitted','quoted','contracted','cancelled'].includes(req.query.status) ? req.query.status : null;
     let q = supabase.from('quote_requests')
-      .select('id, token, status, customer_phone, customer_name, clean_type, housing_type, area_size, area_type, region, desired_date, notes, room_count, bathroom_count, veranda_count, site_conditions, appliance_options, aircon_info, referral_source, photos, final_quote_amount, created_at, submitted_at, quoted_at')
+      .select('id, token, status, customer_phone, customer_name, clean_type, housing_type, area_size, area_type, region, desired_date, notes, room_count, bathroom_count, veranda_count, site_conditions, appliance_options, aircon_info, referral_source, owner_info, photos, final_quote_amount, created_at, submitted_at, quoted_at')
       .order('created_at', { ascending: false }).limit(100);
     if (status) q = q.eq('status', status);
     // owner만 본인 것 + 다른 owner의 것도 (1인 운영 단순화)
