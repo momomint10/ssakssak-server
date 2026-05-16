@@ -184,15 +184,22 @@ async function sendPushTo(anon_id, payload) {
 // ════════════════════════════════════════════════════════════════
 // ── Phase 2: 인증 시스템 (admin_users + SMS OTP + JWT) ─────────
 // ════════════════════════════════════════════════════════════════
-const JWT_SECRET = process.env.JWT_SECRET || '';
+// JWT_SECRET: Railway 환경변수 우선 사용. 미설정 시 서버 시작 시점에
+// 메모리에 무작위 64바이트 시크릿 자동 생성 (재시작 시 변경 → 기존 세션 무효).
+// 사장님이 Railway에 등록하면 영구 유지. 미등록이어도 시스템은 정상 작동.
+const JWT_SECRET = process.env.JWT_SECRET ||
+  require('crypto').randomBytes(64).toString('hex');
+const JWT_SECRET_FROM_ENV = !!process.env.JWT_SECRET;
 const JWT_TTL_SEC = 30 * 24 * 60 * 60;          // 30일
 const OTP_TTL_MS  = 3 * 60 * 1000;              // 3분
 const OTP_RESEND_COOLDOWN_MS = 60 * 1000;       // 재발송 1분
 const OTP_HOURLY_MAX = 5;                       // 시간당 발송 5회 (per phone)
 const OTP_MAX_ATTEMPTS = 5;                     // 검증 5회 실패 시 무효
 
-if (!JWT_SECRET) {
-  console.warn('⚠️  JWT_SECRET 환경변수 미설정 — /api/auth/* 라우트 비활성화');
+if (JWT_SECRET_FROM_ENV) {
+  console.log('✅ JWT_SECRET: Railway 환경변수 사용 (영구)');
+} else {
+  console.warn('⚠️  JWT_SECRET: 메모리 자동 생성 사용 (서버 재시작 시 모든 로그인 풀림). 영구 유지하려면 Railway Variables에 JWT_SECRET 등록 권장.');
 }
 
 // E.164 정규화: 010-1234-5678 → +821012345678
@@ -315,7 +322,6 @@ async function sendOtpSms(toPhone, code) {
 // ── POST /api/auth/send-otp { phone } ──────────────────────────
 // 화이트리스트 검증 → rate limit → OTP 생성 → SMS 발송
 app.post('/api/auth/send-otp', async (req, res) => {
-  if (!JWT_SECRET) return res.status(500).json({ success: false, error: '서버 설정 오류: JWT_SECRET 미설정' });
   try {
     const phone = normalizePhone(req.body.phone);
     if (!phone || !/^\+82\d{9,11}$/.test(phone)) {
@@ -377,7 +383,6 @@ app.post('/api/auth/send-otp', async (req, res) => {
 // ── POST /api/auth/verify-otp { phone, code } ─────────────────
 // OTP 검증 → JWT 발급 → last_login_at 갱신
 app.post('/api/auth/verify-otp', async (req, res) => {
-  if (!JWT_SECRET) return res.status(500).json({ success: false, error: '서버 설정 오류: JWT_SECRET 미설정' });
   try {
     const phone = normalizePhone(req.body.phone);
     const code = String(req.body.code || '').trim();
