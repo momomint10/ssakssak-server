@@ -181,6 +181,334 @@ async function sendPushTo(anon_id, payload) {
   }
 }
 
+// ════════════════════════════════════════════════════════════════
+// ── Phase 2: 인증 시스템 (admin_users + SMS OTP + JWT) ─────────
+// ════════════════════════════════════════════════════════════════
+const JWT_SECRET = process.env.JWT_SECRET || '';
+const JWT_TTL_SEC = 30 * 24 * 60 * 60;          // 30일
+const OTP_TTL_MS  = 3 * 60 * 1000;              // 3분
+const OTP_RESEND_COOLDOWN_MS = 60 * 1000;       // 재발송 1분
+const OTP_HOURLY_MAX = 5;                       // 시간당 발송 5회 (per phone)
+const OTP_MAX_ATTEMPTS = 5;                     // 검증 5회 실패 시 무효
+
+if (!JWT_SECRET) {
+  console.warn('⚠️  JWT_SECRET 환경변수 미설정 — /api/auth/* 라우트 비활성화');
+}
+
+// E.164 정규화: 010-1234-5678 → +821012345678
+function normalizePhone(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+  let p = raw.replace(/[\s\-().]/g, '');
+  if (!p) return '';
+  if (p.startsWith('+82')) return p;
+  if (p.startsWith('82')) return '+' + p;
+  if (p.startsWith('0')) return '+82' + p.substring(1);
+  return p;
+}
+
+// SHA256 hex
+function hashCode(code) {
+  return require('crypto').createHash('sha256').update(String(code)).digest('hex');
+}
+
+// 6자리 OTP 발생 (cryptographically secure)
+function genOtp() {
+  const buf = require('crypto').randomBytes(4);
+  const n = buf.readUInt32BE(0) % 1000000;
+  return String(n).padStart(6, '0');
+}
+
+// base64url 인코딩 (Node 16+ 'base64url' 지원)
+function b64url(buf) {
+  return Buffer.isBuffer(buf) ? buf.toString('base64url') : Buffer.from(buf).toString('base64url');
+}
+
+// JWT HS256 서명 (자체 구현 — 의존성 추가 없이)
+function signJwt(payload) {
+  if (!JWT_SECRET) throw new Error('JWT_SECRET not set');
+  const header = b64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+  const now = Math.floor(Date.now() / 1000);
+  const body = b64url(JSON.stringify({ ...payload, iat: now, exp: now + JWT_TTL_SEC }));
+  const sig = b64url(require('crypto').createHmac('sha256', JWT_SECRET).update(header + '.' + body).digest());
+  return header + '.' + body + '.' + sig;
+}
+
+function verifyJwt(token) {
+  if (!JWT_SECRET || !token || typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  const expected = b64url(require('crypto').createHmac('sha256', JWT_SECRET).update(parts[0] + '.' + parts[1]).digest());
+  // timing-safe compare
+  if (expected.length !== parts[2].length) return null;
+  if (!require('crypto').timingSafeEqual(Buffer.from(expected), Buffer.from(parts[2]))) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
+    if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) return null;
+    return payload;
+  } catch { return null; }
+}
+
+// 미들웨어: Authorization: Bearer <jwt> 검증
+async function authRequired(req, res, next) {
+  const h = req.headers.authorization || '';
+  const token = h.startsWith('Bearer ') ? h.slice(7) : '';
+  const payload = verifyJwt(token);
+  if (!payload || !payload.sub) {
+    return res.status(401).json({ success: false, error: '로그인이 필요합니다', code: 'AUTH_REQUIRED' });
+  }
+  // 사용자 상태 확인 (disabled 즉시 반영)
+  const { data: u, error } = await supabase.from('admin_users')
+    .select('id, phone_e164, role, name, status')
+    .eq('id', payload.sub).maybeSingle();
+  if (error || !u) return res.status(401).json({ success: false, error: '계정 없음', code: 'AUTH_USER_GONE' });
+  if (u.status !== 'active') return res.status(403).json({ success: false, error: '비활성화된 계정입니다', code: 'AUTH_DISABLED' });
+  req.user = u;
+  next();
+}
+
+function ownerOnly(req, res, next) {
+  if (!req.user || req.user.role !== 'owner') {
+    return res.status(403).json({ success: false, error: '관리자 권한 필요', code: 'AUTH_OWNER_ONLY' });
+  }
+  next();
+}
+
+// 로그인 이력 기록 (비동기, 응답 차단 안 함)
+function logAuth(phone, outcome, userId, req) {
+  supabase.from('auth_login_log').insert({
+    phone_e164: phone,
+    user_id: userId,
+    outcome,
+    ip: (req.headers['x-forwarded-for'] || req.ip || '').toString().split(',')[0].trim(),
+    user_agent: (req.headers['user-agent'] || '').slice(0, 200)
+  }).then(({ error }) => {
+    if (error) console.error('auth_login_log insert error:', error.message);
+  });
+}
+
+// CoolSMS 발송 헬퍼 (OTP 전용 짧은 메시지)
+async function sendOtpSms(toPhone, code) {
+  const apiKey = process.env.COOLSMS_API_KEY;
+  const apiSecret = process.env.COOLSMS_API_SECRET;
+  const from = process.env.COOLSMS_FROM;
+  if (!apiKey || !apiSecret || !from) throw new Error('SMS_NOT_CONFIGURED');
+  const crypto = require('crypto');
+  const date = new Date().toISOString();
+  const salt = Math.random().toString(36).substring(2, 12);
+  const signature = crypto.createHmac('sha256', apiSecret).update(date + salt).digest('hex');
+  const text = `[싹싹] 인증번호: ${code}\n3분 안에 입력해 주세요.`;
+  const r = await fetch('https://api.coolsms.co.kr/messages/v4/send', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `HMAC-SHA256 apiKey=${apiKey}, date=${date}, salt=${salt}, signature=${signature}`
+    },
+    body: JSON.stringify({
+      message: { to: toPhone.replace(/[\s\-+]/g,'').replace(/^82/,'0'), from: from.replace(/-/g,''), text, type: 'SMS' }
+    })
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.errorMessage || 'SMS_SEND_FAIL');
+  return data;
+}
+
+// ── POST /api/auth/send-otp { phone } ──────────────────────────
+// 화이트리스트 검증 → rate limit → OTP 생성 → SMS 발송
+app.post('/api/auth/send-otp', async (req, res) => {
+  if (!JWT_SECRET) return res.status(500).json({ success: false, error: '서버 설정 오류: JWT_SECRET 미설정' });
+  try {
+    const phone = normalizePhone(req.body.phone);
+    if (!phone || !/^\+82\d{9,11}$/.test(phone)) {
+      return res.status(400).json({ success: false, error: '휴대폰 번호를 정확히 입력해 주세요' });
+    }
+    // 1) 화이트리스트 검증
+    const { data: u } = await supabase.from('admin_users')
+      .select('id, phone_e164, role, status').eq('phone_e164', phone).maybeSingle();
+    if (!u || u.status !== 'active') {
+      logAuth(phone, 'otp_blocked_whitelist', null, req);
+      // 보안: 등록 여부를 노출하지 않기 위해 동일한 일반 메시지
+      return res.status(403).json({ success: false, error: '등록되지 않은 번호입니다. 관리자에게 문의해 주세요.' });
+    }
+    // 2) Rate limit: 직전 발송 1분 이내?
+    const oneMinAgo = new Date(Date.now() - OTP_RESEND_COOLDOWN_MS).toISOString();
+    const { data: recent } = await supabase.from('auth_otp_codes')
+      .select('id, created_at').eq('phone_e164', phone)
+      .gte('created_at', oneMinAgo).order('created_at', { ascending: false }).limit(1).maybeSingle();
+    if (recent) {
+      logAuth(phone, 'otp_blocked_rate', u.id, req);
+      return res.status(429).json({ success: false, error: '잠시 후 다시 시도해 주세요 (1분 내 1회 발송)', code: 'RATE_LIMIT' });
+    }
+    // 3) Rate limit: 1시간 5회?
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const { count: hourCount } = await supabase.from('auth_otp_codes')
+      .select('id', { count: 'exact', head: true }).eq('phone_e164', phone)
+      .gte('created_at', oneHourAgo);
+    if ((hourCount || 0) >= OTP_HOURLY_MAX) {
+      logAuth(phone, 'otp_blocked_rate', u.id, req);
+      return res.status(429).json({ success: false, error: '시간당 발송 한도 초과 (5회). 1시간 후 다시 시도해 주세요.', code: 'RATE_LIMIT_HOUR' });
+    }
+    // 4) OTP 생성 + 저장 + SMS 발송
+    const code = genOtp();
+    const codeHash = hashCode(code);
+    const expiresAt = new Date(Date.now() + OTP_TTL_MS).toISOString();
+    const { error: insErr } = await supabase.from('auth_otp_codes').insert({
+      phone_e164: phone, code_hash: codeHash, expires_at: expiresAt,
+      client_ip: (req.headers['x-forwarded-for'] || req.ip || '').toString().split(',')[0].trim(),
+      user_agent: (req.headers['user-agent'] || '').slice(0, 200)
+    });
+    if (insErr) {
+      console.error('otp insert error:', insErr.message);
+      return res.status(500).json({ success: false, error: 'OTP 생성 실패' });
+    }
+    try {
+      await sendOtpSms(phone, code);
+      logAuth(phone, 'otp_sent', u.id, req);
+      res.json({ success: true, message: '인증번호를 발송했습니다', expires_in_sec: OTP_TTL_MS / 1000 });
+    } catch (smsErr) {
+      console.error('OTP SMS 발송 실패:', smsErr.message);
+      res.status(500).json({ success: false, error: 'SMS 발송 실패 — 잠시 후 다시 시도해 주세요' });
+    }
+  } catch (e) {
+    console.error('send-otp error:', e);
+    res.status(500).json({ success: false, error: '서버 오류' });
+  }
+});
+
+// ── POST /api/auth/verify-otp { phone, code } ─────────────────
+// OTP 검증 → JWT 발급 → last_login_at 갱신
+app.post('/api/auth/verify-otp', async (req, res) => {
+  if (!JWT_SECRET) return res.status(500).json({ success: false, error: '서버 설정 오류: JWT_SECRET 미설정' });
+  try {
+    const phone = normalizePhone(req.body.phone);
+    const code = String(req.body.code || '').trim();
+    if (!phone || !/^\d{6}$/.test(code)) {
+      return res.status(400).json({ success: false, error: '휴대폰 번호와 6자리 인증번호를 확인해 주세요' });
+    }
+    // 최신 OTP row 조회 (사용 안 한 것, 만료 안 된 것 우선)
+    const { data: otp } = await supabase.from('auth_otp_codes')
+      .select('id, code_hash, expires_at, used, attempts')
+      .eq('phone_e164', phone).eq('used', false)
+      .order('created_at', { ascending: false }).limit(1).maybeSingle();
+    if (!otp) {
+      logAuth(phone, 'verify_fail', null, req);
+      return res.status(401).json({ success: false, error: '인증번호를 먼저 발송해 주세요', code: 'OTP_NOT_FOUND' });
+    }
+    if (new Date(otp.expires_at).getTime() < Date.now()) {
+      logAuth(phone, 'verify_expired', null, req);
+      return res.status(401).json({ success: false, error: '인증번호가 만료됐습니다. 다시 발송해 주세요.', code: 'OTP_EXPIRED' });
+    }
+    if (otp.attempts >= OTP_MAX_ATTEMPTS) {
+      // 시도 한계 초과 → 무효화
+      await supabase.from('auth_otp_codes').update({ used: true }).eq('id', otp.id);
+      logAuth(phone, 'verify_fail', null, req);
+      return res.status(401).json({ success: false, error: '시도 한도 초과. 인증번호를 다시 발송해 주세요.', code: 'OTP_LOCKED' });
+    }
+    // 검증
+    const expected = hashCode(code);
+    const ok = otp.code_hash.length === expected.length &&
+      require('crypto').timingSafeEqual(Buffer.from(otp.code_hash), Buffer.from(expected));
+    if (!ok) {
+      await supabase.from('auth_otp_codes').update({ attempts: otp.attempts + 1 }).eq('id', otp.id);
+      logAuth(phone, 'verify_fail', null, req);
+      return res.status(401).json({ success: false, error: '인증번호가 올바르지 않습니다', code: 'OTP_WRONG' });
+    }
+    // 성공 — used 마킹
+    await supabase.from('auth_otp_codes').update({ used: true }).eq('id', otp.id);
+    // 사용자 조회 + last_login_at 갱신
+    const { data: u } = await supabase.from('admin_users')
+      .select('id, phone_e164, role, name, status').eq('phone_e164', phone).maybeSingle();
+    if (!u || u.status !== 'active') {
+      logAuth(phone, 'verify_fail', null, req);
+      return res.status(403).json({ success: false, error: '계정이 활성화되어 있지 않습니다' });
+    }
+    await supabase.from('admin_users').update({ last_login_at: new Date().toISOString() }).eq('id', u.id);
+    const token = signJwt({ sub: u.id, phone: u.phone_e164, role: u.role, name: u.name });
+    logAuth(phone, 'verify_ok', u.id, req);
+    res.json({ success: true, token, user: { id: u.id, phone: u.phone_e164, role: u.role, name: u.name }, expires_in_sec: JWT_TTL_SEC });
+  } catch (e) {
+    console.error('verify-otp error:', e);
+    res.status(500).json({ success: false, error: '서버 오류' });
+  }
+});
+
+// ── GET /api/auth/me ──────────────────────────────────────────
+app.get('/api/auth/me', authRequired, (req, res) => {
+  res.json({ success: true, user: { id: req.user.id, phone: req.user.phone_e164, role: req.user.role, name: req.user.name } });
+});
+
+// ── 관리자 — 화이트리스트 관리 ────────────────────────────────
+// GET /api/admin/users
+app.get('/api/admin/users', authRequired, ownerOnly, async (req, res) => {
+  const { data, error } = await supabase.from('admin_users')
+    .select('id, phone_e164, role, name, status, approved_at, last_login_at, created_at')
+    .order('created_at', { ascending: true });
+  if (error) return res.status(500).json({ success: false, error: error.message });
+  res.json({ success: true, data });
+});
+
+// POST /api/admin/users { phone, name }
+app.post('/api/admin/users', authRequired, ownerOnly, async (req, res) => {
+  const phone = normalizePhone(req.body.phone);
+  const name = String(req.body.name || '').trim().slice(0, 40);
+  if (!phone || !/^\+82\d{9,11}$/.test(phone)) {
+    return res.status(400).json({ success: false, error: '휴대폰 번호를 정확히 입력해 주세요' });
+  }
+  const { data, error } = await supabase.from('admin_users').insert({
+    phone_e164: phone, role: 'approved', name: name || null,
+    status: 'active', approved_by: req.user.id, approved_at: new Date().toISOString()
+  }).select('id, phone_e164, role, name, status').maybeSingle();
+  if (error) {
+    if (error.code === '23505') return res.status(409).json({ success: false, error: '이미 등록된 번호입니다' });
+    return res.status(500).json({ success: false, error: error.message });
+  }
+  res.json({ success: true, data });
+});
+
+// PATCH /api/admin/users/:id  { status?, name? }
+app.patch('/api/admin/users/:id', authRequired, ownerOnly, async (req, res) => {
+  const id = req.params.id;
+  const patch = {};
+  if (req.body.status === 'active' || req.body.status === 'disabled') patch.status = req.body.status;
+  if (typeof req.body.name === 'string') patch.name = req.body.name.trim().slice(0, 40);
+  if (!Object.keys(patch).length) return res.status(400).json({ success: false, error: '변경할 값이 없습니다' });
+  // owner 자기 자신을 disabled 시키는 것 방지
+  if (id === req.user.id && patch.status === 'disabled') {
+    return res.status(400).json({ success: false, error: '본인 계정은 비활성화할 수 없습니다' });
+  }
+  const { data, error } = await supabase.from('admin_users').update(patch).eq('id', id)
+    .select('id, phone_e164, role, name, status').maybeSingle();
+  if (error) return res.status(500).json({ success: false, error: error.message });
+  res.json({ success: true, data });
+});
+
+// DELETE /api/admin/users/:id
+app.delete('/api/admin/users/:id', authRequired, ownerOnly, async (req, res) => {
+  const id = req.params.id;
+  if (id === req.user.id) return res.status(400).json({ success: false, error: '본인 계정은 삭제할 수 없습니다' });
+  // owner 보호: 마지막 owner 삭제 방지
+  const { data: target } = await supabase.from('admin_users').select('role').eq('id', id).maybeSingle();
+  if (target && target.role === 'owner') {
+    const { count } = await supabase.from('admin_users').select('id', { count: 'exact', head: true }).eq('role', 'owner').eq('status', 'active');
+    if ((count || 0) <= 1) return res.status(400).json({ success: false, error: '마지막 관리자는 삭제할 수 없습니다' });
+  }
+  const { error } = await supabase.from('admin_users').delete().eq('id', id);
+  if (error) return res.status(500).json({ success: false, error: error.message });
+  res.json({ success: true });
+});
+
+// GET /api/admin/login-log?limit=50
+app.get('/api/admin/login-log', authRequired, ownerOnly, async (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit || '50') || 50, 200);
+  const { data, error } = await supabase.from('auth_login_log')
+    .select('id, phone_e164, user_id, outcome, ip, user_agent, created_at')
+    .order('created_at', { ascending: false }).limit(limit);
+  if (error) return res.status(500).json({ success: false, error: error.message });
+  res.json({ success: true, data });
+});
+
+// ════════════════════════════════════════════════════════════════
+// (위 인증 인프라는 추가 — 기존 라우트는 다음 단계에서 미들웨어 적용)
+
 // ── 서버 상태 확인 ──────────────────────────────
 app.get('/', (req, res) => {
   res.json({
@@ -1600,7 +1928,7 @@ app.post('/api/reminders/process', async (req, res) => {
 // ──────────────────────────────────────────────────────────────
 app.get('/api/_status', async (req, res) => {
   const ENV_KEYS = [
-    'ADMIN_KEY', 'COOLSMS_API_KEY', 'COOLSMS_API_SECRET', 'COOLSMS_FROM',
+    'ADMIN_KEY', 'JWT_SECRET', 'COOLSMS_API_KEY', 'COOLSMS_API_SECRET', 'COOLSMS_FROM',
     'VAPID_PUBLIC_KEY', 'VAPID_PRIVATE_KEY', 'VAPID_SUBJECT',
     'SUPABASE_URL', 'SUPABASE_SERVICE_KEY'
   ];
