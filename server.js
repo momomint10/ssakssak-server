@@ -725,7 +725,7 @@ app.get('/api/stats', async (req, res) => {
 });
 
 // ── SMS 발송 (CoolSMS) ────────────────────────
-app.post('/api/sms/send', async (req, res) => {
+app.post('/api/sms/send', authRequired, async (req, res) => {
   // ── 보안 강화: origin 검증 (curl/Postman 등 서버사이드 호출 차단) ──
   // CORS 화이트리스트가 origin 없는 요청을 허용하므로 라우트 단에서 추가 검증.
   // 브라우저는 origin 자동 설정 → 위조 불가. 서버사이드 호출자는 origin 없음 → 차단.
@@ -1133,7 +1133,7 @@ app.get('/api/schedules', async (req, res) => {
 });
 
 // 신규 추가
-app.post('/api/schedules', async (req, res) => {
+app.post('/api/schedules', authRequired, async (req, res) => {
   try {
     const { anon_id, name, phone, date, time, addr, type, size, price, memo, status, source, source_id } = req.body;
     if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필수' });
@@ -1163,7 +1163,7 @@ app.post('/api/schedules', async (req, res) => {
 });
 
 // 수정 (필드 부분 업데이트)
-app.put('/api/schedules/:id', async (req, res) => {
+app.put('/api/schedules/:id', authRequired, async (req, res) => {
   try {
     const { id } = req.params;
     const { anon_id } = req.body;
@@ -1192,7 +1192,7 @@ app.put('/api/schedules/:id', async (req, res) => {
 });
 
 // 삭제
-app.delete('/api/schedules/:id', async (req, res) => {
+app.delete('/api/schedules/:id', authRequired, async (req, res) => {
   try {
     const { id } = req.params;
     const anon_id = req.query.anon_id || req.body.anon_id;
@@ -1268,7 +1268,7 @@ app.get('/api/community/posts', async (req, res) => {
 });
 
 // 2) 피드 글 작성 (이미지 base64 업로드 지원)
-app.post('/api/community/posts', async (req, res) => {
+app.post('/api/community/posts', authRequired, async (req, res) => {
   try {
     const { anon_id, title, content, imageBase64, imageMime, author_name, category } = req.body || {};
     if (!validateAnonId(anon_id)) return res.status(400).json({ success: false, error: 'anon_id 필수' });
@@ -1374,7 +1374,7 @@ app.get('/api/community/posts/:id', async (req, res) => {
 });
 
 // 4) 글 삭제 (본인만)
-app.delete('/api/community/posts/:id', async (req, res) => {
+app.delete('/api/community/posts/:id', authRequired, async (req, res) => {
   try {
     const { id } = req.params;
     const { anon_id } = req.body || {};
@@ -1395,7 +1395,7 @@ app.delete('/api/community/posts/:id', async (req, res) => {
 });
 
 // 5) 좋아요 토글
-app.post('/api/community/posts/:id/like', async (req, res) => {
+app.post('/api/community/posts/:id/like', authRequired, async (req, res) => {
   try {
     const { id } = req.params;
     const { anon_id } = req.body || {};
@@ -1436,7 +1436,7 @@ app.post('/api/community/posts/:id/like', async (req, res) => {
 });
 
 // 6) 댓글 작성
-app.post('/api/community/posts/:id/comments', async (req, res) => {
+app.post('/api/community/posts/:id/comments', authRequired, async (req, res) => {
   try {
     const { id } = req.params;
     const { anon_id, content, author_name } = req.body || {};
@@ -1476,7 +1476,7 @@ app.post('/api/community/posts/:id/comments', async (req, res) => {
 });
 
 // 7) 댓글 삭제 (본인만)
-app.delete('/api/community/comments/:id', async (req, res) => {
+app.delete('/api/community/comments/:id', authRequired, async (req, res) => {
   try {
     const { id } = req.params;
     const { anon_id } = req.body || {};
@@ -1514,7 +1514,7 @@ app.get('/api/push/vapid-key', (req, res) => {
 
 // 구독 등록
 // body: { endpoint, p256dh, auth, anon_id, deviceId? }
-app.post('/api/push/subscribe', async (req, res) => {
+app.post('/api/push/subscribe', authRequired, async (req, res) => {
   try {
     const { endpoint, p256dh, auth, anon_id, deviceId } = req.body || {};
     if (!endpoint || !p256dh || !auth) {
@@ -1543,7 +1543,7 @@ app.post('/api/push/subscribe', async (req, res) => {
 
 // 구독 해제
 // body: { endpoint }
-app.delete('/api/push/subscribe', async (req, res) => {
+app.delete('/api/push/subscribe', authRequired, async (req, res) => {
   try {
     const { endpoint } = req.body || {};
     if (!endpoint) return res.status(400).json({ success: false, error: 'endpoint 필수' });
@@ -1700,7 +1700,7 @@ app.put('/api/bookings/:id/status', async (req, res) => {
 // 📅 예약 단축 URL 토큰 (booking_tokens 테이블 활용)
 // 긴 URL → 짧은 ?t=xxx 토큰 URL로 변환
 // ──────────────────────────────────────────────────────────────
-app.post('/api/booking/token', async (req, res) => {
+app.post('/api/booking/token', authRequired, async (req, res) => {
   try {
     const { name, phone, size, type, price, companyName } = req.body || {};
     if (!phone || !size) return res.status(400).json({ success: false, error: 'phone, size 필수' });
@@ -2116,7 +2116,7 @@ app.get('/api/workers/my/:anon_id', async (req, res) => {
 });
 
 // 프로필 등록/수정 (upsert) — 입력 검증 강화
-app.post('/api/workers', async (req, res) => {
+app.post('/api/workers', authRequired, async (req, res) => {
   try {
     const body = req.body || {};
 
@@ -2233,7 +2233,7 @@ app.get('/api/workers/:id', async (req, res) => {
 
 // 워커 상태 변경 (active / inactive)
 // 본인만 변경 가능 — anon_id로 본인 검증
-app.patch('/api/workers/:id/status', async (req, res) => {
+app.patch('/api/workers/:id/status', authRequired, async (req, res) => {
   try {
     const { id } = req.params;
     const { anon_id, status } = req.body || {};
@@ -2258,7 +2258,7 @@ app.patch('/api/workers/:id/status', async (req, res) => {
 });
 
 // 프로필 삭제 (본인만 — anon_id 검증)
-app.delete('/api/workers/:id', async (req, res) => {
+app.delete('/api/workers/:id', authRequired, async (req, res) => {
   try {
     const { anon_id } = req.body || {};
     if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필수' });
@@ -2353,7 +2353,7 @@ app.get('/api/jobs/:id', async (req, res) => {
 
 // 채용공고 등록
 // body: { anon_id, title, region, work_date, headcount, daily_rate, skills, description, contact }
-app.post('/api/jobs', async (req, res) => {
+app.post('/api/jobs', authRequired, async (req, res) => {
   try {
     const { anon_id, title, region, work_date, headcount, daily_rate, skills, description, contact } = req.body || {};
     if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필수' });
@@ -2383,7 +2383,7 @@ app.post('/api/jobs', async (req, res) => {
 });
 
 // 채용공고 상태 변경 (본인만 — 보안 정책 일관 적용)
-app.patch('/api/jobs/:id/status', async (req, res) => {
+app.patch('/api/jobs/:id/status', authRequired, async (req, res) => {
   try {
     const { id } = req.params;
     const { anon_id, status } = req.body || {};
@@ -2405,7 +2405,7 @@ app.patch('/api/jobs/:id/status', async (req, res) => {
 });
 
 // 지원하기
-app.post('/api/jobs/:id/apply', async (req, res) => {
+app.post('/api/jobs/:id/apply', authRequired, async (req, res) => {
   try {
     const { applicant_anon_id, applicant_contact, worker_nickname, message } = req.body || {};
     if (!applicant_anon_id) return res.status(400).json({ success: false, error: 'anon_id 필요' });
@@ -2456,7 +2456,7 @@ app.get('/api/jobs/:id/applications', async (req, res) => {
 });
 
 // 매칭 확정 (공고 작성자만)
-app.patch('/api/jobs/applications/:id/match', async (req, res) => {
+app.patch('/api/jobs/applications/:id/match', authRequired, async (req, res) => {
   try {
     const { anon_id, employer_contact } = req.body || {};
     if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필수' });
@@ -2522,7 +2522,7 @@ app.get('/api/worker-chats', async (req, res) => {
 
 // ── 2) 채팅방 생성/조회 (메시지 전송과 분리) ──────────────────
 // requester가 worker에게 채팅 시작
-app.post('/api/worker-chats', async (req, res) => {
+app.post('/api/worker-chats', authRequired, async (req, res) => {
   try {
     const { worker_id, requester_anon_id } = req.body || {};
     if (!worker_id || !requester_anon_id) {
@@ -2585,7 +2585,7 @@ app.get('/api/worker-chats/:id/messages', async (req, res) => {
 });
 
 // ── 4) 메시지 전송 ──────────────────────────────────────────
-app.post('/api/worker-chats/:id/messages', async (req, res) => {
+app.post('/api/worker-chats/:id/messages', authRequired, async (req, res) => {
   try {
     const { id } = req.params;
     const { anon_id, content } = req.body || {};
@@ -2638,7 +2638,7 @@ app.post('/api/worker-chats/:id/messages', async (req, res) => {
 
 // ── 5) 읽음 처리 ────────────────────────────────────────────
 // 본인이 채팅방을 열었을 때, 상대방이 보낸 미확인 메시지 모두 read_at 업데이트
-app.post('/api/worker-chats/:id/read', async (req, res) => {
+app.post('/api/worker-chats/:id/read', authRequired, async (req, res) => {
   try {
     const { id } = req.params;
     const { anon_id } = req.body || {};
@@ -2745,7 +2745,7 @@ app.get('/api/market/listings/:id', async (req, res) => {
 });
 
 // 등록 (화이트리스트 + 입력 검증 — body spread 차단)
-app.post('/api/market/listings', async (req, res) => {
+app.post('/api/market/listings', authRequired, async (req, res) => {
   try {
     const { anon_id, title, description, price, category, image_url, contact } = req.body || {};
     if (!anon_id || !title || price === undefined) return res.status(400).json({ success:false, error: '필수값 누락' });
@@ -2774,7 +2774,7 @@ app.post('/api/market/listings', async (req, res) => {
 });
 
 // 상태 변경 (available/reserved/sold)
-app.patch('/api/market/listings/:id/status', async (req, res) => {
+app.patch('/api/market/listings/:id/status', authRequired, async (req, res) => {
   try {
     const { status, anon_id } = req.body;
     const { error } = await supabase.from('market_listings').update({ status }).eq('id', req.params.id).eq('anon_id', anon_id);
@@ -2784,7 +2784,7 @@ app.patch('/api/market/listings/:id/status', async (req, res) => {
 });
 
 // 삭제
-app.delete('/api/market/listings/:id', async (req, res) => {
+app.delete('/api/market/listings/:id', authRequired, async (req, res) => {
   try {
     const { anon_id } = req.body;
     const { error } = await supabase.from('market_listings').update({ status:'deleted' }).eq('id', req.params.id).eq('anon_id', anon_id);
