@@ -184,23 +184,72 @@ async function sendPushTo(anon_id, payload) {
 // ════════════════════════════════════════════════════════════════
 // ── Phase 2: 인증 시스템 (admin_users + SMS OTP + JWT) ─────────
 // ════════════════════════════════════════════════════════════════
-// JWT_SECRET: Railway 환경변수 우선 사용. 미설정 시 서버 시작 시점에
-// 메모리에 무작위 64바이트 시크릿 자동 생성 (재시작 시 변경 → 기존 세션 무효).
-// 사장님이 Railway에 등록하면 영구 유지. 미등록이어도 시스템은 정상 작동.
-const JWT_SECRET = process.env.JWT_SECRET ||
-  require('crypto').randomBytes(64).toString('hex');
-const JWT_SECRET_FROM_ENV = !!process.env.JWT_SECRET;
+// JWT_SECRET 부트스트랩 (2026-05-17 영구화)
+// 우선순위: Railway 환경변수 > Supabase app_secrets DB > 메모리 신규 생성+저장
+// 코드 push 시 Railway 재배포에도 시크릿 유지 → 30일 세션 보존 → SMS 비용 절감
+let JWT_SECRET = '';
+let JWT_SECRET_SOURCE = 'pending';
 const JWT_TTL_SEC = 30 * 24 * 60 * 60;          // 30일
 const OTP_TTL_MS  = 3 * 60 * 1000;              // 3분
 const OTP_RESEND_COOLDOWN_MS = 60 * 1000;       // 재발송 1분
 const OTP_HOURLY_MAX = 5;                       // 시간당 발송 5회 (per phone)
 const OTP_MAX_ATTEMPTS = 5;                     // 검증 5회 실패 시 무효
 
-if (JWT_SECRET_FROM_ENV) {
-  console.log('✅ JWT_SECRET: Railway 환경변수 사용 (영구)');
-} else {
-  console.warn('⚠️  JWT_SECRET: 메모리 자동 생성 사용 (서버 재시작 시 모든 로그인 풀림). 영구 유지하려면 Railway Variables에 JWT_SECRET 등록 권장.');
+async function bootstrapJwtSecret() {
+  // 1순위: Railway 환경변수
+  if (process.env.JWT_SECRET) {
+    JWT_SECRET = process.env.JWT_SECRET;
+    JWT_SECRET_SOURCE = 'env';
+    console.log('✅ JWT_SECRET: Railway 환경변수 사용 (영구)');
+    return;
+  }
+  // 2순위: Supabase app_secrets DB
+  try {
+    const { data: row, error } = await supabase
+      .from('app_secrets').select('value').eq('key', 'JWT_SECRET').maybeSingle();
+    if (!error && row && row.value && row.value.length >= 32) {
+      JWT_SECRET = row.value;
+      JWT_SECRET_SOURCE = 'db';
+      console.log('✅ JWT_SECRET: Supabase DB 사용 (영구 — 코드 push에도 유지)');
+      return;
+    }
+  } catch (e) {
+    console.error('JWT_SECRET DB read error:', e.message);
+  }
+  // 3순위: 신규 생성 + DB 영구 저장
+  const newSecret = require('crypto').randomBytes(64).toString('hex');
+  try {
+    const { error: insErr } = await supabase
+      .from('app_secrets').insert({
+        key: 'JWT_SECRET',
+        value: newSecret,
+        description: '서버 자동 생성 (2026-05-17) — JWT HS256 서명 키'
+      });
+    if (insErr) {
+      // 동시 다중 인스턴스에서 race로 이미 다른 row가 들어갔을 가능성 — 다시 read
+      const { data: retry } = await supabase
+        .from('app_secrets').select('value').eq('key', 'JWT_SECRET').maybeSingle();
+      if (retry && retry.value) {
+        JWT_SECRET = retry.value;
+        JWT_SECRET_SOURCE = 'db-race-recovered';
+        console.log('✅ JWT_SECRET: DB 동시 생성 감지 → 기존 값 사용');
+        return;
+      }
+      throw insErr;
+    }
+    JWT_SECRET = newSecret;
+    JWT_SECRET_SOURCE = 'generated';
+    console.log('✅ JWT_SECRET: 신규 생성 후 DB 영구 저장 (이후 재배포에서도 유지)');
+  } catch (e) {
+    // DB 저장 실패 — 메모리만 사용 (재시작 시 풀림)
+    JWT_SECRET = newSecret;
+    JWT_SECRET_SOURCE = 'memory-fallback';
+    console.warn('⚠️  JWT_SECRET DB 저장 실패 — 메모리 사용:', e.message);
+  }
 }
+
+// 비동기 부트스트랩 — 서버 listen 전까지 완료
+const JWT_BOOTSTRAP = bootstrapJwtSecret();
 
 // E.164 정규화: 010-1234-5678 → +821012345678
 function normalizePhone(raw) {
@@ -2395,11 +2444,17 @@ ${smsReady ? '<div class="ok">✅ CoolSMS 환경변수 모두 등록됨 — SMS 
 </body></html>`);
 });
 
-// 서버 시작
+// 서버 시작 (JWT_SECRET 부트스트랩 완료 후)
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`✅ 싹싹 서버 실행 중 - 포트 ${PORT}`);
-  console.log(`🧹 싹싹 입주청소 전문인 플랫폼`);
+JWT_BOOTSTRAP.then(() => {
+  app.listen(PORT, () => {
+    console.log(`✅ 싹싹 서버 실행 중 - 포트 ${PORT}`);
+    console.log(`🧹 싹싹 입주청소 전문인 플랫폼`);
+    console.log(`🔑 JWT_SECRET source: ${JWT_SECRET_SOURCE}`);
+  });
+}).catch((e) => {
+  console.error('FATAL: JWT_SECRET bootstrap failed —', e.message);
+  process.exit(1);
 });
 
 // ═══════════════════════════════════════════════════════════════
