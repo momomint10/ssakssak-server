@@ -1845,7 +1845,7 @@ app.get('/api/quote-requests/by-token/:token', async (req, res) => {
     const { token } = req.params;
     if (!/^[a-f0-9]{32}$/.test(token)) return res.status(400).json({ success: false, error: '잘못된 링크' });
     const { data, error } = await supabase.from('quote_requests')
-      .select('id, token, status, customer_phone, customer_name, clean_type, area_size, region, desired_date, notes, photos, final_quote_amount, expires_at, submitted_at, quoted_at')
+      .select('id, token, status, customer_phone, customer_name, clean_type, housing_type, area_size, area_type, region, desired_date, notes, room_count, bathroom_count, veranda_count, site_conditions, appliance_options, aircon_info, referral_source, photos, final_quote_amount, expires_at, submitted_at, quoted_at')
       .eq('token', token).maybeSingle();
     if (error) return res.status(500).json({ success: false, error: error.message });
     if (!data)  return res.status(404).json({ success: false, error: '만료되었거나 존재하지 않는 링크입니다' });
@@ -1875,27 +1875,80 @@ app.put('/api/quote-requests/by-token/:token', async (req, res) => {
     if (row.status !== 'pending' && row.status !== 'submitted') {
       return res.status(400).json({ success: false, error: '이미 견적이 발송된 요청입니다' });
     }
-    // 입력 검증
-    const cleanTypes = ['입주청소','이사청소','거주청소'];
+    // 입력 검증 (Phase D 확장: 프리덤클린 레퍼런스 통합)
+    // 1) 청소 유형 — 5종
+    const cleanTypes = ['신축입주청소','구축이사청소','거주청소','사이청소','인테리어 후 청소'];
     const cleanType = cleanTypes.includes(req.body.clean_type) ? req.body.clean_type : null;
+
+    // 2) 주거 형태 — 7종
+    const housingTypes = ['원룸','투룸','아파트','오피스텔','빌라','주택','사무실'];
+    const housingType = housingTypes.includes(req.body.housing_type) ? req.body.housing_type : null;
+
+    // 3) 평수 + 전용/공급
     const areaSize  = parseInt(req.body.area_size) || null;
     if (areaSize !== null && (areaSize < 1 || areaSize > 999)) {
       return res.status(400).json({ success: false, error: '평수는 1~999 사이' });
     }
+    const areaType = (req.body.area_type === '전용' || req.body.area_type === '공급') ? req.body.area_type : null;
+
+    // 4) 지역 + 시공일 + 특이사항
     const region    = clampStr(req.body.region || '', 50);
     const desiredDate = req.body.desired_date && /^\d{4}-\d{2}-\d{2}$/.test(req.body.desired_date) ? req.body.desired_date : null;
     const notes     = clampStr(req.body.notes || '', 1000);
+
+    // 5) 방·화장실·베란다 갯수
+    const roomCount    = req.body.room_count     === null || req.body.room_count     === undefined ? null : parseInt(req.body.room_count);
+    const bathroomCount= req.body.bathroom_count === null || req.body.bathroom_count === undefined ? null : parseInt(req.body.bathroom_count);
+    const verandaCount = req.body.veranda_count  === null || req.body.veranda_count  === undefined ? null : parseInt(req.body.veranda_count);
+    for (const [k, v] of [['room_count',roomCount],['bathroom_count',bathroomCount],['veranda_count',verandaCount]]) {
+      if (v !== null && Number.isFinite(v) && (v < 0 || v > 99)) {
+        return res.status(400).json({ success: false, error: `${k}는 0~99 사이` });
+      }
+    }
+
+    // 6) 현장 조건 (다중 선택, 최대 9개)
+    const allowedConditions = ['보조주방','광폭거실','거실 추가창문','엘리베이터 없음','베란다 곰팡이','시트지 자국','안전고리','니코틴 제거'];
+    const siteConditions = Array.isArray(req.body.site_conditions)
+      ? req.body.site_conditions.filter(s => allowedConditions.includes(s)).slice(0, 9)
+      : [];
+
+    // 7) 가전 분해청소 [{name, count}]
+    const allowedAppliances = ['단문형 냉장고','양문형 냉장고','단문형 김치냉장고','양문형 김치냉장고','식기세척기','오븐','세탁기(드럼)'];
+    let applianceOptions = [];
+    if (Array.isArray(req.body.appliance_options)) {
+      applianceOptions = req.body.appliance_options
+        .filter(a => a && allowedAppliances.includes(a.name) && Number.isFinite(parseInt(a.count)) && parseInt(a.count) > 0)
+        .map(a => ({ name: a.name, count: Math.min(parseInt(a.count), 20) }))
+        .slice(0, 7);
+    }
+
+    // 8) 에어컨 정보 (자유 텍스트)
+    const airconInfo = clampStr(req.body.aircon_info || '', 200);
+
+    // 9) 유입 채널
+    const referralSources = ['블로그','인스타그램','스레드','유튜브','부동산소개','지인추천','카페','기타'];
+    const referralSource = referralSources.includes(req.body.referral_source) ? req.body.referral_source : null;
+
     // 사진은 별도 라우트에서 업로드 — 여기서는 photos 배열만 갱신
     const photos = Array.isArray(req.body.photos) ? req.body.photos.slice(0, 5) : undefined;
 
     const patch = {
-      clean_type: cleanType,
-      area_size: areaSize,
-      region: region || null,
-      desired_date: desiredDate,
-      notes: notes || null,
-      status: 'submitted',
-      submitted_at: new Date().toISOString()
+      clean_type:        cleanType,
+      housing_type:      housingType,
+      area_size:         areaSize,
+      area_type:         areaType,
+      region:            region || null,
+      desired_date:      desiredDate,
+      notes:             notes || null,
+      room_count:        Number.isFinite(roomCount)    ? roomCount    : null,
+      bathroom_count:    Number.isFinite(bathroomCount)? bathroomCount: null,
+      veranda_count:     Number.isFinite(verandaCount) ? verandaCount : null,
+      site_conditions:   siteConditions,
+      appliance_options: applianceOptions,
+      aircon_info:       airconInfo || null,
+      referral_source:   referralSource,
+      status:            'submitted',
+      submitted_at:      new Date().toISOString()
     };
     if (photos !== undefined) patch.photos = photos;
 
@@ -1973,7 +2026,7 @@ app.get('/api/quote-requests', authRequired, async (req, res) => {
   try {
     const status = req.query.status && ['pending','submitted','quoted','contracted','cancelled'].includes(req.query.status) ? req.query.status : null;
     let q = supabase.from('quote_requests')
-      .select('id, token, status, customer_phone, customer_name, clean_type, area_size, region, desired_date, notes, photos, final_quote_amount, created_at, submitted_at, quoted_at')
+      .select('id, token, status, customer_phone, customer_name, clean_type, housing_type, area_size, area_type, region, desired_date, notes, room_count, bathroom_count, veranda_count, site_conditions, appliance_options, aircon_info, referral_source, photos, final_quote_amount, created_at, submitted_at, quoted_at')
       .order('created_at', { ascending: false }).limit(100);
     if (status) q = q.eq('status', status);
     // owner만 본인 것 + 다른 owner의 것도 (1인 운영 단순화)
