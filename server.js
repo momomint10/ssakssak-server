@@ -189,7 +189,7 @@ async function sendPushTo(anon_id, payload) {
 // 코드 push 시 Railway 재배포에도 시크릿 유지 → 30일 세션 보존 → SMS 비용 절감
 let JWT_SECRET = '';
 let JWT_SECRET_SOURCE = 'pending';
-const JWT_TTL_SEC = 30 * 24 * 60 * 60;          // 30일
+const JWT_TTL_SEC = 90 * 24 * 60 * 60;          // 90일 (D2 A 결정)
 const OTP_TTL_MS  = 3 * 60 * 1000;              // 3분
 const OTP_RESEND_COOLDOWN_MS = 60 * 1000;       // 재발송 1분
 const OTP_HOURLY_MAX = 5;                       // 시간당 발송 5회 (per phone)
@@ -488,6 +488,134 @@ app.post('/api/auth/verify-otp', async (req, res) => {
 // ── GET /api/auth/me ──────────────────────────────────────────
 app.get('/api/auth/me', authRequired, (req, res) => {
   res.json({ success: true, user: { id: req.user.id, phone: req.user.phone_e164, role: req.user.role, name: req.user.name } });
+});
+
+// ════════════════════════════════════════════════════════════════
+// PIN 빠른 로그인 (SMS 비용 절감 / 매번 OTP 받는 불편 해소)
+// ════════════════════════════════════════════════════════════════
+function hashPinPbkdf2(pin, saltHex) {
+  return require('crypto').pbkdf2Sync(pin, Buffer.from(saltHex, 'hex'), 100000, 32, 'sha256').toString('hex');
+}
+function genSaltHex() {
+  return require('crypto').randomBytes(16).toString('hex');
+}
+
+// GET /api/auth/pin-status?phone=01012345678
+// 사용자가 PIN 설정되어 있는지 확인 (login.html이 UI 분기)
+// 정보 노출 최소화: PIN 미설정/사용자 미등록은 동일 응답
+app.get('/api/auth/pin-status', async (req, res) => {
+  try {
+    const phone = normalizePhone(req.query.phone || '');
+    if (!phone || !/^\+82\d{9,11}$/.test(phone)) {
+      return res.json({ success: true, has_pin: false });
+    }
+    const { data: u } = await supabase.from('admin_users')
+      .select('pin_hash, pin_locked_until, status').eq('phone_e164', phone).maybeSingle();
+    if (!u || u.status !== 'active') {
+      return res.json({ success: true, has_pin: false });
+    }
+    const locked = u.pin_locked_until && new Date(u.pin_locked_until).getTime() > Date.now();
+    res.json({
+      success: true,
+      has_pin: !!u.pin_hash,
+      locked: locked,
+      locked_until: locked ? u.pin_locked_until : null
+    });
+  } catch (e) {
+    console.error('pin-status error:', e.message);
+    res.json({ success: true, has_pin: false });
+  }
+});
+
+// POST /api/auth/pin/verify { phone, pin } → JWT 발급 (SMS 없이)
+app.post('/api/auth/pin/verify', async (req, res) => {
+  try {
+    const phone = normalizePhone(req.body.phone);
+    const pin = String(req.body.pin || '').trim();
+    if (!phone || !/^\+82\d{9,11}$/.test(phone)) {
+      return res.status(400).json({ success: false, error: '휴대폰 번호 확인' });
+    }
+    if (!/^\d{4}$/.test(pin)) {
+      return res.status(400).json({ success: false, error: '4자리 숫자 PIN' });
+    }
+    const { data: u } = await supabase.from('admin_users')
+      .select('id, phone_e164, role, name, status, pin_hash, pin_salt, pin_attempts, pin_locked_until')
+      .eq('phone_e164', phone).maybeSingle();
+    if (!u || u.status !== 'active' || !u.pin_hash || !u.pin_salt) {
+      logAuth(phone, 'verify_fail', null, req);
+      return res.status(401).json({ success: false, error: 'PIN 로그인이 설정되지 않았습니다. SMS로 로그인 후 PIN을 설정하세요.', code: 'PIN_NOT_SET' });
+    }
+    // 잠금 확인
+    if (u.pin_locked_until && new Date(u.pin_locked_until).getTime() > Date.now()) {
+      const remainMin = Math.ceil((new Date(u.pin_locked_until).getTime() - Date.now()) / 60000);
+      return res.status(429).json({ success: false, error: `PIN 잠금. ${remainMin}분 후 또는 SMS 인증으로 재로그인`, code: 'PIN_LOCKED' });
+    }
+    // 검증
+    const expected = hashPinPbkdf2(pin, u.pin_salt);
+    const ok = expected.length === u.pin_hash.length &&
+      require('crypto').timingSafeEqual(Buffer.from(expected), Buffer.from(u.pin_hash));
+    if (!ok) {
+      const newCount = (u.pin_attempts || 0) + 1;
+      const patch = { pin_attempts: newCount };
+      // 5회 연속 실패 시 30분 잠금
+      if (newCount >= 5) {
+        patch.pin_locked_until = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+      }
+      await supabase.from('admin_users').update(patch).eq('id', u.id);
+      logAuth(phone, 'verify_fail', u.id, req);
+      const remaining = 5 - newCount;
+      return res.status(401).json({
+        success: false,
+        error: newCount >= 5
+          ? 'PIN 5회 실패. 30분간 잠금. SMS로 재로그인하세요.'
+          : `PIN 불일치. 남은 시도 ${remaining}회.`,
+        code: newCount >= 5 ? 'PIN_LOCKED_NOW' : 'PIN_WRONG'
+      });
+    }
+    // 성공 — 시도 횟수 리셋 + JWT 발급
+    await supabase.from('admin_users').update({
+      pin_attempts: 0, pin_locked_until: null,
+      last_login_at: new Date().toISOString()
+    }).eq('id', u.id);
+    const token = signJwt({ sub: u.id, phone: u.phone_e164, role: u.role, name: u.name });
+    logAuth(phone, 'verify_ok', u.id, req);
+    res.json({ success: true, token, user: { id: u.id, phone: u.phone_e164, role: u.role, name: u.name }, method: 'pin' });
+  } catch (e) {
+    console.error('pin verify error:', e);
+    res.status(500).json({ success: false, error: '서버 오류' });
+  }
+});
+
+// POST /api/auth/pin/setup { pin } — JWT 인증된 사용자만 PIN 설정/변경
+app.post('/api/auth/pin/setup', authRequired, async (req, res) => {
+  try {
+    const pin = String(req.body.pin || '').trim();
+    if (!/^\d{4}$/.test(pin)) return res.status(400).json({ success: false, error: '4자리 숫자' });
+    // 너무 단순한 PIN 방지
+    if (/^(\d)\1{3}$/.test(pin) || pin === '1234' || pin === '0000' || pin === '1111') {
+      return res.status(400).json({ success: false, error: '너무 단순한 PIN (1234, 0000, 1111 등 금지)' });
+    }
+    const salt = genSaltHex();
+    const hash = hashPinPbkdf2(pin, salt);
+    const { error } = await supabase.from('admin_users').update({
+      pin_hash: hash, pin_salt: salt, pin_set_at: new Date().toISOString(),
+      pin_attempts: 0, pin_locked_until: null
+    }).eq('id', req.user.id);
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    res.json({ success: true, message: 'PIN 설정 완료' });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// DELETE /api/auth/pin — PIN 비활성화 (사장님이 해제 시)
+app.delete('/api/auth/pin', authRequired, async (req, res) => {
+  const { error } = await supabase.from('admin_users').update({
+    pin_hash: null, pin_salt: null, pin_set_at: null,
+    pin_attempts: 0, pin_locked_until: null
+  }).eq('id', req.user.id);
+  if (error) return res.status(500).json({ success: false, error: error.message });
+  res.json({ success: true, message: 'PIN 해제' });
 });
 
 // ── 관리자 — 화이트리스트 관리 ────────────────────────────────
