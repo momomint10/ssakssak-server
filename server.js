@@ -759,12 +759,7 @@ app.post('/api/subscribe', async (req, res) => {
 });
 
 // ── 구독자 목록 조회 (관리자용) ─────────────────
-app.get('/api/subscribers', async (req, res) => {
-  const adminKey = req.headers['x-admin-key'];
-  if (adminKey !== process.env.ADMIN_KEY) {
-    return res.status(401).json({ success: false, error: '인증 실패' });
-  }
-
+app.get('/api/subscribers', authRequired, ownerOnly, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('subscribers')
@@ -781,12 +776,7 @@ app.get('/api/subscribers', async (req, res) => {
 });
 
 // ── 구독자 상태 변경 (관리자용) ─────────────────
-app.put('/api/subscribers/:id/status', async (req, res) => {
-  const adminKey = req.headers['x-admin-key'];
-  if (adminKey !== process.env.ADMIN_KEY) {
-    return res.status(401).json({ success: false, error: '인증 실패' });
-  }
-
+app.put('/api/subscribers/:id/status', authRequired, ownerOnly, async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
 
@@ -873,12 +863,7 @@ app.get('/api/workforce', async (req, res) => {
 });
 
 // ── 통계 (관리자용) ──────────────────────────────
-app.get('/api/stats', async (req, res) => {
-  const adminKey = req.headers['x-admin-key'];
-  if (adminKey !== process.env.ADMIN_KEY) {
-    return res.status(401).json({ success: false, error: '인증 실패' });
-  }
-
+app.get('/api/stats', authRequired, ownerOnly, async (req, res) => {
   try {
     const { data: all } = await supabase.from('subscribers').select('status, plan');
 
@@ -1811,12 +1796,7 @@ app.post('/api/booking', async (req, res) => {
   }
 });
 
-app.get('/api/bookings', async (req, res) => {
-  // 보안: 사장님 데이터 → adminKey 필수 (header OR query 둘 다 수용)
-  const adminKey = req.headers['x-admin-key'] || req.query.adminKey || '';
-  if (adminKey !== process.env.ADMIN_KEY) {
-    return res.status(401).json({ success: false, error: '인증 실패' });
-  }
+app.get('/api/bookings', authRequired, ownerOnly, async (req, res) => {
   try {
     const status = req.query.status || null;
     const date = req.query.date || null;
@@ -1831,11 +1811,7 @@ app.get('/api/bookings', async (req, res) => {
   }
 });
 
-app.patch('/api/bookings/:id', async (req, res) => {
-  const adminKey = req.headers['x-admin-key'] || req.query.adminKey || '';
-  if (adminKey !== process.env.ADMIN_KEY) {
-    return res.status(401).json({ success: false, error: '인증 실패' });
-  }
+app.patch('/api/bookings/:id', authRequired, ownerOnly, async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
@@ -1847,13 +1823,7 @@ app.patch('/api/bookings/:id', async (req, res) => {
   }
 });
 
-app.put('/api/bookings/:id/status', async (req, res) => {
-  // header OR query 둘 다 수용 (schedule.html 호환)
-  const adminKey = req.headers['x-admin-key'] || req.query.adminKey || '';
-  if (adminKey !== process.env.ADMIN_KEY) {
-    return res.status(401).json({ success: false, error: '인증 실패' });
-  }
-
+app.put('/api/bookings/:id/status', authRequired, ownerOnly, async (req, res) => {
   const { id } = req.params;
   const { status } = req.body; // pending | confirmed | completed | cancelled
 
@@ -2376,12 +2346,8 @@ async function _processReminders() {
 }
 
 // POST /api/reminders — 새 리마인더 예약 (사장님 인증)
-app.post('/api/reminders', async (req, res) => {
+app.post('/api/reminders', authRequired, ownerOnly, async (req, res) => {
   try {
-    const adminKey = req.headers['x-admin-key'] || req.body.adminKey || '';
-    if (adminKey && adminKey !== process.env.ADMIN_KEY) {
-      return res.status(401).json({ success: false, error: '인증 실패' });
-    }
     const { anon_id, customer_phone, customer_name, message, hours_later, source_type, source_ref } = req.body || {};
     if (!validateAnonId(anon_id)) return res.status(400).json({ success: false, error: 'anon_id 필수' });
     if (!customer_phone || customer_phone.length < 8) return res.status(400).json({ success: false, error: '고객 연락처 필수' });
@@ -2412,12 +2378,8 @@ app.post('/api/reminders', async (req, res) => {
 });
 
 // GET /api/reminders — 본인 리마인더 목록 (사장님 인증)
-app.get('/api/reminders', async (req, res) => {
+app.get('/api/reminders', authRequired, ownerOnly, async (req, res) => {
   try {
-    const adminKey = req.headers['x-admin-key'] || req.query.adminKey || '';
-    if (adminKey && adminKey !== process.env.ADMIN_KEY) {
-      return res.status(401).json({ success: false, error: '인증 실패' });
-    }
     const { anon_id } = req.query;
     if (!validateAnonId(anon_id)) return res.status(400).json({ success: false, error: 'anon_id 필수' });
     const status = req.query.status || 'scheduled';
@@ -2433,12 +2395,8 @@ app.get('/api/reminders', async (req, res) => {
 });
 
 // DELETE /api/reminders/:id — 리마인더 취소 (본인만)
-app.delete('/api/reminders/:id', async (req, res) => {
+app.delete('/api/reminders/:id', authRequired, ownerOnly, async (req, res) => {
   try {
-    const adminKey = req.headers['x-admin-key'] || req.query.adminKey || '';
-    if (adminKey && adminKey !== process.env.ADMIN_KEY) {
-      return res.status(401).json({ success: false, error: '인증 실패' });
-    }
     const { anon_id } = req.body || req.query || {};
     if (!validateAnonId(anon_id)) return res.status(400).json({ success: false, error: 'anon_id 필수' });
     const { data, error } = await supabase.from('pending_reminders')
