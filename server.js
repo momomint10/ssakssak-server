@@ -1050,9 +1050,12 @@ async function sendSMSUtil(to, msg, subject, opts = {}) {
   return response.ok ? { ok: true } : { ok: false, error: (await response.json()).errorMessage };
 }
 
-// ── 계약서 PDF 업로드 & SMS 발송 ─────────────────
+// ── 계약서 / 완료보고서 PDF 업로드 & SMS 발송 ─────────
+// body.type: 'contract' (기본) | 'report' — SMS 본문 분기
 app.post('/api/contract/upload', async (req, res) => {
-  const { pdfBase64, customerPhone, ownerPhone, customerName, companyName, companyPhone } = req.body;
+  const { pdfBase64, customerPhone, ownerPhone, customerName, companyName, companyPhone, type } = req.body;
+  const docType = type === 'report' ? 'report' : 'contract';
+  const docLabel = docType === 'report' ? '완료보고서' : '계약서';
 
   if (!pdfBase64 || !customerPhone) {
     return res.status(400).json({ success: false, error: '필수 데이터가 없습니다' });
@@ -1079,19 +1082,37 @@ app.post('/api/contract/upload', async (req, res) => {
 
     const pdfUrl = urlData.publicUrl;
 
-    // 계약서 SMS 문구
-    const customerMsg = `📋 [${companyName||'서프로클린'}] 계약서 안내\n${customerName}님, 계약서가 작성되었습니다.\n\n아래 링크에서 확인 및 보관하세요:\n${pdfUrl}\n\n문의: ${companyPhone||''}`;
-    const ownerMsg = `📋 계약서 체결 완료\n고객: ${customerName}님 (${customerPhone})\n\n계약서 링크:\n${pdfUrl}`;
+    // 견적 톤 기준 통일 SMS 본문 (사장님 D2 A 결정)
+    const intro = docType === 'report'
+      ? '시공이 완료되어 보고서를 보내드립니다.'
+      : '계약서가 작성되어 보내드립니다.';
+
+    const customerMsg = `안녕하세요, ${customerName||'고객'}님!
+${companyName||'서프로클린'} 입주청소입니다.
+
+━━━━ ${docLabel} 안내 ━━━━
+${intro}
+아래 링크에서 확인하시고 보관해 주세요.
+━━━━━━━━━━━━━━
+
+📎 ${docLabel} PDF: ${pdfUrl}
+${companyPhone ? `\n📞 문의: ${companyPhone}` : ''}`;
+
+    const ownerMsg = `📋 ${docLabel} 발송 완료
+고객: ${customerName||'고객'}님 (${customerPhone})
+
+PDF 링크:
+${pdfUrl}`;
 
     // 고객 SMS 발송
-    await sendSMSUtil(customerPhone, customerMsg, null, { type: 'contract', customerName });
+    await sendSMSUtil(customerPhone, customerMsg, null, { type: docType, customerName });
 
     // 사장님 SMS 발송 (번호가 있고 고객과 다를 때)
     if (ownerPhone && ownerPhone.replace(/-/g,'') !== customerPhone.replace(/-/g,'')) {
-      await sendSMSUtil(ownerPhone, ownerMsg, null, { type: 'contract', customerName });
+      await sendSMSUtil(ownerPhone, ownerMsg, null, { type: docType, customerName });
     }
 
-    console.log(`계약서 업로드 완료: ${filePath}`);
+    console.log(`${docLabel} 업로드 완료: ${filePath}`);
     res.json({ success: true, pdfUrl });
 
   } catch (err) {
@@ -1171,7 +1192,17 @@ app.post('/api/contract/create', async (req, res) => {
 
     // 서명 URL: ssakapp.co.kr 기준
     const signUrl = `https://ssakapp.co.kr/sign.html?token=${token}`;
-    const msg = `[${companyName}] 계약서 서명 요청\n\n${customerName||'고객'}님, 아래 링크에서 계약서 내용을 확인하고 서명해 주세요.\n\n${signUrl}\n\n링크는 7일간 유효합니다.\n\n문의: ${companyPhone}`;
+    const msg = `안녕하세요, ${customerName||'고객'}님!
+${companyName||'서프로클린'} 입주청소입니다.
+
+━━━━ 계약서 서명 안내 ━━━━
+계약 진행을 위해 아래 링크에서
+서명을 부탁드립니다.
+링크는 7일간 유효합니다.
+━━━━━━━━━━━━━━
+
+✍️ 서명 링크: ${signUrl}
+${companyPhone ? `\n📞 문의: ${companyPhone}` : ''}`;
 
     await sendSMSUtil(customerPhone.replace(/-/g,''), msg, `[${companyName}] 계약서 서명요청`, {
       type: 'contract',
