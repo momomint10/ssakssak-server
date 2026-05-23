@@ -1706,25 +1706,26 @@ app.get('/api/push/vapid-key', (req, res) => {
 });
 
 // 구독 등록
-// body: { endpoint, p256dh, auth, anon_id, deviceId? }
+// body: { endpoint, p256dh, auth, anon_id, deviceId?, reminder_hour?, reminder_minute? }
 app.post('/api/push/subscribe', authRequired, async (req, res) => {
   try {
-    const { endpoint, p256dh, auth, anon_id, deviceId } = req.body || {};
+    const { endpoint, p256dh, auth, anon_id, deviceId, reminder_hour, reminder_minute } = req.body || {};
     if (!endpoint || !p256dh || !auth) {
       return res.status(400).json({ success: false, error: 'endpoint, p256dh, auth 필수' });
     }
     if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필수' });
 
+    const row = {
+      endpoint, p256dh, auth, anon_id,
+      device_id: deviceId || null,
+      updated_at: new Date().toISOString()
+    };
+    if (Number.isInteger(reminder_hour) && reminder_hour >= 0 && reminder_hour <= 23) row.reminder_hour = reminder_hour;
+    if (Number.isInteger(reminder_minute) && reminder_minute >= 0 && reminder_minute <= 59) row.reminder_minute = reminder_minute;
+
     // endpoint UNIQUE 제약 활용 — upsert로 중복 시 갱신
     const { data, error } = await supabase.from('push_subscriptions')
-      .upsert([{
-        endpoint,
-        p256dh,
-        auth,
-        anon_id,
-        device_id: deviceId || null,
-        updated_at: new Date().toISOString()
-      }], { onConflict: 'endpoint' })
+      .upsert([row], { onConflict: 'endpoint' })
       .select().single();
     if (error) throw error;
     res.json({ success: true, data: { id: data.id } });
@@ -1745,6 +1746,139 @@ app.delete('/api/push/subscribe', authRequired, async (req, res) => {
     res.json({ success: true });
   } catch (e) {
     console.error('push unsubscribe error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  일정 리마인더 자동 푸시 (Phase 1)
+//  컬럼: push_subscriptions.reminder_hour/minute/enabled/last_reminder_date
+// ═══════════════════════════════════════════════════════════════
+
+// GET /api/push/reminder?endpoint= : 현재 설정 조회
+app.get('/api/push/reminder', authRequired, async (req, res) => {
+  try {
+    const { endpoint } = req.query;
+    if (!endpoint) return res.status(400).json({ success: false, error: 'endpoint 필수' });
+    const { data } = await supabase.from('push_subscriptions')
+      .select('reminder_hour, reminder_minute, reminder_enabled')
+      .eq('endpoint', endpoint).maybeSingle();
+    res.json({ success: true, data: data || { reminder_hour: 8, reminder_minute: 0, reminder_enabled: true } });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// PATCH /api/push/reminder : 시간/ON-OFF 변경
+// body: { endpoint, reminder_hour?, reminder_minute?, reminder_enabled? }
+app.patch('/api/push/reminder', authRequired, async (req, res) => {
+  try {
+    const { endpoint, reminder_hour, reminder_minute, reminder_enabled } = req.body || {};
+    if (!endpoint) return res.status(400).json({ success: false, error: 'endpoint 필수' });
+
+    const patch = { updated_at: new Date().toISOString() };
+    if (Number.isInteger(reminder_hour) && reminder_hour >= 0 && reminder_hour <= 23) patch.reminder_hour = reminder_hour;
+    if (Number.isInteger(reminder_minute) && reminder_minute >= 0 && reminder_minute <= 59) patch.reminder_minute = reminder_minute;
+    if (typeof reminder_enabled === 'boolean') patch.reminder_enabled = reminder_enabled;
+
+    const { error } = await supabase.from('push_subscriptions').update(patch).eq('endpoint', endpoint);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// ── KST 헬퍼 ─────────────────────────────────────────────────
+function _nowKST() {
+  return new Date(Date.now() + 9 * 60 * 60 * 1000);
+}
+function _kstDateStr(d) {
+  d = d || _nowKST();
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}-${String(d.getUTCDate()).padStart(2,'0')}`;
+}
+
+// ── 단일 구독자에게 푸시 (410은 자동 삭제) ────────────────────
+async function _sendPushToSubscription(sub, payload) {
+  try {
+    await webpush.sendNotification(
+      { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
+      JSON.stringify(payload)
+    );
+    return true;
+  } catch (e) {
+    if (e.statusCode === 410 || e.statusCode === 404) {
+      await supabase.from('push_subscriptions').delete().eq('endpoint', sub.endpoint);
+    }
+    console.log('reminder push fail:', e.statusCode, e.message);
+    return false;
+  }
+}
+
+// ── 리마인더 실행기 (cron + 수동 트리거에서 호출) ─────────────
+async function _runReminders({ force = false, anon_id_filter = null } = {}) {
+  if (!PUSH_ENABLED) return { sent: 0, skipped: 'push_disabled' };
+  const kst = _nowKST();
+  const today = _kstDateStr(kst);
+  const hh = kst.getUTCHours();
+  const mm = kst.getUTCMinutes();
+
+  let q = supabase.from('push_subscriptions').select('*').eq('reminder_enabled', true);
+  if (!force) {
+    q = q.eq('reminder_hour', hh).eq('reminder_minute', mm)
+         .or(`last_reminder_date.is.null,last_reminder_date.lt.${today}`);
+  }
+  if (anon_id_filter) q = q.eq('anon_id', anon_id_filter);
+
+  const { data: subs, error } = await q;
+  if (error) { console.log('[reminder] subs query error:', error.message); return { sent: 0 }; }
+  if (!subs || !subs.length) return { sent: 0 };
+
+  let sent = 0;
+  for (const sub of subs) {
+    if (!sub.anon_id) continue;
+    const { data: items } = await supabase.from('schedules')
+      .select('name, time, addr')
+      .eq('anon_id', sub.anon_id).eq('date', today)
+      .order('time', { ascending: true });
+
+    if (!items || items.length === 0) {
+      if (!force) {
+        await supabase.from('push_subscriptions')
+          .update({ last_reminder_date: today }).eq('endpoint', sub.endpoint);
+      }
+      continue;
+    }
+    const lines = items.slice(0, 5).map((s, i) =>
+      `${i+1}) ${s.time || '시간미정'} ${(s.name || '고객').slice(0,6)}${s.addr ? ' ('+s.addr.slice(0,8)+')' : ''}`
+    ).join('\n');
+    const more = items.length > 5 ? `\n외 ${items.length - 5}건` : '';
+
+    const ok = await _sendPushToSubscription(sub, {
+      title: `🧹 오늘 일정 ${items.length}건`,
+      body: lines + more,
+      icon: '/icon-192.png',
+      url: '/schedule.html',
+      tag: 'daily-reminder'
+    });
+    if (ok) sent++;
+    if (!force) {
+      await supabase.from('push_subscriptions')
+        .update({ last_reminder_date: today }).eq('endpoint', sub.endpoint);
+    }
+  }
+  if (sent > 0) console.log(`[reminder] ${today} ${hh}:${mm} → ${sent}건 발송`);
+  return { sent };
+}
+
+// POST /api/push/test-reminder : 수동 트리거 (adminKey 필요)
+app.post('/api/push/test-reminder', async (req, res) => {
+  try {
+    const { adminKey, anon_id } = req.body || {};
+    if (adminKey !== process.env.ADMIN_KEY) return res.status(401).json({ success: false, error: '인증 실패' });
+    const result = await _runReminders({ force: true, anon_id_filter: anon_id || null });
+    res.json({ success: true, ...result });
+  } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -2634,6 +2768,17 @@ JWT_BOOTSTRAP.then(() => {
     console.log(`✅ 싹싹 서버 실행 중 - 포트 ${PORT}`);
     console.log(`🧹 싹싹 입주청소 전문인 플랫폼`);
     console.log(`🔑 JWT_SECRET source: ${JWT_SECRET_SOURCE}`);
+
+    // ── 일정 리마인더 cron (매분 KST 체크) ──
+    try {
+      const cron = require('node-cron');
+      cron.schedule('* * * * *', () => {
+        _runReminders().catch(e => console.log('[cron] error:', e.message));
+      });
+      console.log('🔔 리마인더 cron 활성화 (매분 KST 체크)');
+    } catch (e) {
+      console.error('cron 활성화 실패:', e.message);
+    }
   });
 }).catch((e) => {
   console.error('FATAL: JWT_SECRET bootstrap failed —', e.message);
