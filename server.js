@@ -1068,19 +1068,20 @@ app.post('/api/contract/upload', async (req, res) => {
     const fileName = `${timestamp}_${customerPhone.replace(/-/g,'')}.pdf`;
     const filePath = `contracts/${fileName}`;
 
-    // Supabase Storage 업로드
+    // Supabase Storage 업로드 (Private 버킷 — 계약서 PDF는 개인정보 포함)
     const { error: uploadError } = await supabase.storage
-      .from('ssak-contracts')
+      .from('ssak-contracts-private')
       .upload(filePath, pdfBuffer, { contentType: 'application/pdf', upsert: true });
 
     if (uploadError) throw uploadError;
 
-    // Public URL 생성
-    const { data: urlData } = supabase.storage
-      .from('ssak-contracts')
-      .getPublicUrl(filePath);
+    // Signed URL 생성 (7일 만료 — 개인정보보호법 제29조 부합)
+    const { data: urlData, error: signError } = await supabase.storage
+      .from('ssak-contracts-private')
+      .createSignedUrl(filePath, 7 * 24 * 60 * 60);
+    if (signError) throw signError;
 
-    const pdfUrl = urlData.publicUrl;
+    const pdfUrl = urlData.signedUrl;
 
     // 견적 톤 기준 통일 SMS 본문 (사장님 D2 A 결정)
     const intro = docType === 'report'
@@ -1250,10 +1251,12 @@ app.post('/api/contract/:token/sign', async (req, res) => {
       const pdfBuffer = Buffer.from(pdfBase64, 'base64');
       const fileName = `${Date.now()}_${token.slice(0,8)}.pdf`;
       const filePath = `contracts/${fileName}`;
-      const { error: uploadError } = await supabase.storage.from('ssak-contracts').upload(filePath, pdfBuffer, { contentType: 'application/pdf', upsert: true });
+      const { error: uploadError } = await supabase.storage.from('ssak-contracts-private').upload(filePath, pdfBuffer, { contentType: 'application/pdf', upsert: true });
       if (!uploadError) {
-        const { data: urlData } = supabase.storage.from('ssak-contracts').getPublicUrl(filePath);
-        pdfUrl = urlData.publicUrl;
+        const { data: urlData, error: signError } = await supabase.storage
+          .from('ssak-contracts-private')
+          .createSignedUrl(filePath, 7 * 24 * 60 * 60);
+        if (!signError) pdfUrl = urlData.signedUrl;
       }
     }
 
