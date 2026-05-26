@@ -2396,6 +2396,7 @@ app.get('/api/quote-requests', authRequired, async (req, res) => {
     const status = req.query.status && ['pending','submitted','quoted','contracted','cancelled'].includes(req.query.status) ? req.query.status : null;
     let q = supabase.from('quote_requests')
       .select('id, token, status, customer_phone, customer_name, clean_type, housing_type, area_size, area_type, region, desired_date, notes, room_count, bathroom_count, veranda_count, site_conditions, appliance_options, aircon_info, referral_source, owner_info, photos, final_quote_amount, created_at, submitted_at, quoted_at')
+      .eq('deleted', false)
       .order('created_at', { ascending: false }).limit(100);
     if (status) q = q.eq('status', status);
     // owner만 본인 것 + 다른 owner의 것도 (1인 운영 단순화)
@@ -2404,6 +2405,25 @@ app.get('/api/quote-requests', authRequired, async (req, res) => {
     res.json({ success: true, data: data || [] });
   } catch (e) {
     console.error('GET /api/quote-requests error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// 5-1) GET /api/quote-requests/trash — 휴지통 목록 (deleted=true, 최근 7일) (JWT)
+// :id 라우트보다 먼저 등록 필요 (Express 매칭 순서)
+app.get('/api/quote-requests/trash', authRequired, async (req, res) => {
+  try {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const { data, error } = await supabase.from('quote_requests')
+      .select('id, token, status, customer_phone, customer_name, clean_type, area_size, region, final_quote_amount, created_at, deleted_at')
+      .eq('deleted', true)
+      .gte('deleted_at', sevenDaysAgo)
+      .order('deleted_at', { ascending: false })
+      .limit(100);
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    res.json({ success: true, data: data || [] });
+  } catch (e) {
+    console.error('GET /api/quote-requests/trash error:', e);
     res.status(500).json({ success: false, error: e.message });
   }
 });
@@ -2420,7 +2440,7 @@ app.get('/api/quote-requests/:id', authRequired, async (req, res) => {
 });
 
 // 7) PATCH /api/quote-requests/:id — 사장님 정밀 견적 발송 (JWT)
-// body: { final_quote_amount, quote_message, action: 'quote'|'cancel' }
+// body: { final_quote_amount, quote_message, action: 'quote'|'cancel'|'delete'|'restore' }
 app.patch('/api/quote-requests/:id', authRequired, async (req, res) => {
   try {
     const id = req.params.id;
@@ -2432,6 +2452,20 @@ app.patch('/api/quote-requests/:id', authRequired, async (req, res) => {
     if (action === 'cancel') {
       const { error } = await supabase.from('quote_requests')
         .update({ status: 'cancelled' }).eq('id', id);
+      if (error) return res.status(500).json({ success: false, error: error.message });
+      return res.json({ success: true });
+    }
+    if (action === 'delete') {
+      // Soft-delete: deleted=true + deleted_at=now
+      const { error } = await supabase.from('quote_requests')
+        .update({ deleted: true, deleted_at: new Date().toISOString() }).eq('id', id);
+      if (error) return res.status(500).json({ success: false, error: error.message });
+      return res.json({ success: true });
+    }
+    if (action === 'restore') {
+      // 휴지통에서 복구: deleted=false + deleted_at=null
+      const { error } = await supabase.from('quote_requests')
+        .update({ deleted: false, deleted_at: null }).eq('id', id);
       if (error) return res.status(500).json({ success: false, error: error.message });
       return res.json({ success: true });
     }
@@ -2779,6 +2813,20 @@ JWT_BOOTSTRAP.then(() => {
         _runReminders().catch(e => console.log('[cron] error:', e.message));
       });
       console.log('🔔 리마인더 cron 활성화 (매분 KST 체크)');
+
+      // ── 휴지통 자동 정리 cron (매일 03:00 KST: 7일 이상 된 deleted=true 영구 삭제) ──
+      cron.schedule('0 3 * * *', async () => {
+        try {
+          const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+          const { error, count } = await supabase.from('quote_requests')
+            .delete({ count: 'exact' })
+            .eq('deleted', true)
+            .lte('deleted_at', sevenDaysAgo);
+          if (error) console.error('[trash-cleanup] error:', error.message);
+          else if (count && count > 0) console.log(`🗑 quote_requests 영구 삭제: ${count}건 (7일+ 휴지통)`);
+        } catch (e) { console.error('[trash-cleanup] cron error:', e.message); }
+      }, { timezone: 'Asia/Seoul' });
+      console.log('🗑 휴지통 자동 정리 cron 활성화 (매일 03:00 KST)');
     } catch (e) {
       console.error('cron 활성화 실패:', e.message);
     }
