@@ -491,6 +491,125 @@ app.get('/api/auth/me', authRequired, (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════════
+// 신뢰 기기 (Trusted Device) — 자동 로그인 (선택적, 30일)
+// 사장님/권한자가 "이 기기에서 자동 로그인" 체크 시 device_token 발급.
+// 다음 방문 때 OTP/PIN 입력 없이 JWT 자동 발급.
+// ════════════════════════════════════════════════════════════════
+const TRUSTED_DEVICE_TTL_SEC = 30 * 24 * 60 * 60;  // 30일
+
+function genDeviceToken() {
+  return require('crypto').randomBytes(32).toString('base64url');
+}
+
+function hashDeviceToken(token) {
+  return require('crypto').createHash('sha256').update(String(token)).digest('hex');
+}
+
+function deviceNameFromUA(ua) {
+  ua = String(ua || '');
+  let device = '기기', browser = '';
+  if (/iPhone/i.test(ua)) device = 'iPhone';
+  else if (/iPad/i.test(ua)) device = 'iPad';
+  else if (/Android/i.test(ua)) device = 'Android';
+  else if (/Macintosh/i.test(ua)) device = 'Mac';
+  else if (/Windows/i.test(ua)) device = 'Windows';
+  if (/CriOS|Chrome/i.test(ua)) browser = 'Chrome';
+  else if (/FxiOS|Firefox/i.test(ua)) browser = 'Firefox';
+  else if (/Safari/i.test(ua)) browser = 'Safari';
+  else if (/Edg/i.test(ua)) browser = 'Edge';
+  return browser ? `${device} · ${browser}` : device;
+}
+
+// POST /api/auth/trust-device — 현재 JWT 사용자의 기기를 30일 신뢰 등록
+app.post('/api/auth/trust-device', authRequired, async (req, res) => {
+  try {
+    const token = genDeviceToken();
+    const tokenHash = hashDeviceToken(token);
+    const expiresAt = new Date(Date.now() + TRUSTED_DEVICE_TTL_SEC * 1000).toISOString();
+    const deviceName = deviceNameFromUA(req.headers['user-agent']);
+    const { error } = await supabase.from('trusted_devices').insert([{
+      user_id: req.user.id,
+      device_token_hash: tokenHash,
+      device_name: deviceName,
+      expires_at: expiresAt
+    }]);
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    // token 평문은 클라이언트가 localStorage 저장. 서버는 해시만 보관.
+    res.json({ success: true, device_token: token, expires_at: expiresAt, device_name: deviceName });
+  } catch (e) {
+    console.error('trust-device error:', e);
+    res.status(500).json({ success: false, error: '서버 오류' });
+  }
+});
+
+// POST /api/auth/auto-login — device_token으로 인증번호/PIN 없이 JWT 발급
+// body: { device_token }
+app.post('/api/auth/auto-login', async (req, res) => {
+  try {
+    const token = String(req.body.device_token || '').trim();
+    if (!token || token.length < 20) {
+      return res.status(400).json({ success: false, error: 'device_token 필요', code: 'DEVICE_TOKEN_REQUIRED' });
+    }
+    const tokenHash = hashDeviceToken(token);
+    const { data: dev } = await supabase.from('trusted_devices')
+      .select('id, user_id, expires_at')
+      .eq('device_token_hash', tokenHash).maybeSingle();
+    if (!dev) {
+      return res.status(401).json({ success: false, error: '신뢰되지 않은 기기', code: 'DEVICE_UNKNOWN' });
+    }
+    if (new Date(dev.expires_at).getTime() < Date.now()) {
+      await supabase.from('trusted_devices').delete().eq('id', dev.id);
+      return res.status(401).json({ success: false, error: '기기 인증 만료. 인증번호로 다시 로그인해 주세요.', code: 'DEVICE_EXPIRED' });
+    }
+    const { data: u } = await supabase.from('admin_users')
+      .select('id, phone_e164, role, name, status').eq('id', dev.user_id).maybeSingle();
+    if (!u || u.status !== 'active') {
+      return res.status(403).json({ success: false, error: '계정이 비활성화됐습니다', code: 'USER_DISABLED' });
+    }
+    // 사용 시각 갱신
+    await supabase.from('trusted_devices').update({ last_used_at: new Date().toISOString() }).eq('id', dev.id);
+    await supabase.from('admin_users').update({ last_login_at: new Date().toISOString() }).eq('id', u.id);
+    try { logAuth(u.phone_e164, 'auto_login_ok', u.id, req); } catch (_) {}
+    const jwt = signJwt({ sub: u.id, phone: u.phone_e164, role: u.role, name: u.name });
+    res.json({ success: true, token: jwt, user: { id: u.id, phone: u.phone_e164, role: u.role, name: u.name }, expires_in_sec: JWT_TTL_SEC });
+  } catch (e) {
+    console.error('auto-login error:', e);
+    res.status(500).json({ success: false, error: '서버 오류' });
+  }
+});
+
+// GET /api/auth/trust-devices — 본인 신뢰 기기 목록
+app.get('/api/auth/trust-devices', authRequired, async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('trusted_devices')
+      .select('id, device_name, last_used_at, expires_at, created_at')
+      .eq('user_id', req.user.id)
+      .gt('expires_at', new Date().toISOString())
+      .order('last_used_at', { ascending: false });
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    res.json({ success: true, data: data || [] });
+  } catch (e) {
+    res.status(500).json({ success: false, error: '서버 오류' });
+  }
+});
+
+// DELETE /api/auth/trust-devices/:id — 본인 신뢰 기기 제거
+app.delete('/api/auth/trust-devices/:id', authRequired, async (req, res) => {
+  try {
+    const id = req.params.id;
+    if (!/^[a-f0-9-]{36}$/i.test(id)) return res.status(400).json({ success: false, error: '잘못된 id' });
+    const { error } = await supabase.from('trusted_devices')
+      .delete()
+      .eq('id', id)
+      .eq('user_id', req.user.id);
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ success: false, error: '서버 오류' });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
 // PIN 빠른 로그인 (SMS 비용 절감 / 매번 OTP 받는 불편 해소)
 // ════════════════════════════════════════════════════════════════
 function hashPinPbkdf2(pin, saltHex) {
@@ -632,6 +751,7 @@ app.get('/api/admin/users', authRequired, ownerOnly, async (req, res) => {
 app.post('/api/admin/users', authRequired, ownerOnly, async (req, res) => {
   const phone = normalizePhone(req.body.phone);
   const name = String(req.body.name || '').trim().slice(0, 40);
+  const notify = req.body.notify === true;  // 안내 SMS 자동 발송 여부
   if (!phone || !/^\+82\d{9,11}$/.test(phone)) {
     return res.status(400).json({ success: false, error: '휴대폰 번호를 정확히 입력해 주세요' });
   }
@@ -643,7 +763,17 @@ app.post('/api/admin/users', authRequired, ownerOnly, async (req, res) => {
     if (error.code === '23505') return res.status(409).json({ success: false, error: '이미 등록된 번호입니다' });
     return res.status(500).json({ success: false, error: error.message });
   }
-  res.json({ success: true, data });
+  // 안내 SMS 발송 (옵션) — fire-and-forget
+  let sms_sent = false;
+  if (notify) {
+    const greet = name ? `${name}님 안녕하세요.` : '안녕하세요.';
+    const msg = `[싹싹]\n${greet}\n${req.user.name || '관리자'}님이 싹싹 앱 접근 권한을 부여하셨습니다.\n\n▶ 접속: https://ssakapp.co.kr/login.html\n\n첫 로그인 시 인증번호 1회 입력 후,\n다음번부터는 PIN 또는 자동 로그인으로 빠르게 들어오실 수 있어요.`;
+    try {
+      const r = await sendSMSUtil(phone.replace(/^\+82/, '0'), msg, null, { type: 'general', customerName: name || '권한자' });
+      sms_sent = !!r.ok;
+    } catch (e) { console.warn('admin user invite SMS error:', e.message); }
+  }
+  res.json({ success: true, data, sms_sent });
 });
 
 // PATCH /api/admin/users/:id  { status?, name? }
@@ -2827,6 +2957,19 @@ JWT_BOOTSTRAP.then(() => {
         } catch (e) { console.error('[trash-cleanup] cron error:', e.message); }
       }, { timezone: 'Asia/Seoul' });
       console.log('🗑 휴지통 자동 정리 cron 활성화 (매일 03:00 KST)');
+
+      // ── 신뢰 기기 만료 정리 cron (매일 03:05 KST) ──
+      cron.schedule('5 3 * * *', async () => {
+        try {
+          const now = new Date().toISOString();
+          const { error, count } = await supabase.from('trusted_devices')
+            .delete({ count: 'exact' })
+            .lte('expires_at', now);
+          if (error) console.error('[trusted-devices-cleanup] error:', error.message);
+          else if (count && count > 0) console.log(`🔒 trusted_devices 만료 정리: ${count}건`);
+        } catch (e) { console.error('[trusted-devices-cleanup] cron error:', e.message); }
+      }, { timezone: 'Asia/Seoul' });
+      console.log('🔒 신뢰 기기 만료 정리 cron 활성화 (매일 03:05 KST)');
     } catch (e) {
       console.error('cron 활성화 실패:', e.message);
     }
