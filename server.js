@@ -808,6 +808,50 @@ app.delete('/api/admin/users/:id', authRequired, ownerOnly, async (req, res) => 
   res.json({ success: true });
 });
 
+// POST /api/admin/users/:id/pin-setup { pin } — 베타 모드: 관리자가 사용자에게 초기 PIN 설정
+// SMS 인증 없이 신규 사용자가 PIN으로 바로 로그인 가능 (chicken-and-egg 해결)
+app.post('/api/admin/users/:id/pin-setup', authRequired, ownerOnly, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const pin = String(req.body.pin || '').trim();
+    if (!/^\d{4}$/.test(pin)) return res.status(400).json({ success: false, error: '4자리 숫자 PIN' });
+    if (/^(\d)\1{3}$/.test(pin) || pin === '1234' || pin === '0000' || pin === '1111') {
+      return res.status(400).json({ success: false, error: '너무 단순한 PIN (1234, 0000, 1111 등 금지)' });
+    }
+    // 대상 사용자 검증
+    const { data: target } = await supabase.from('admin_users').select('id, phone_e164, status').eq('id', id).maybeSingle();
+    if (!target) return res.status(404).json({ success: false, error: '사용자 없음' });
+    if (target.status !== 'active') return res.status(400).json({ success: false, error: '비활성 사용자' });
+
+    const salt = genSaltHex();
+    const hash = hashPinPbkdf2(pin, salt);
+    const { error } = await supabase.from('admin_users').update({
+      pin_hash: hash, pin_salt: salt, pin_set_at: new Date().toISOString(),
+      pin_attempts: 0, pin_locked_until: null
+    }).eq('id', id);
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    try { logAuth(target.phone_e164, 'admin_set_pin', id, req); } catch (_) {}
+    res.json({ success: true, message: 'PIN 설정 완료', phone: target.phone_e164 });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// DELETE /api/admin/users/:id/pin — 관리자가 사용자 PIN 강제 해제 (분실 시)
+app.delete('/api/admin/users/:id/pin', authRequired, ownerOnly, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { error } = await supabase.from('admin_users').update({
+      pin_hash: null, pin_salt: null, pin_set_at: null,
+      pin_attempts: 0, pin_locked_until: null
+    }).eq('id', id);
+    if (error) return res.status(500).json({ success: false, error: error.message });
+    res.json({ success: true, message: 'PIN 해제 완료' });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // GET /api/admin/login-log?limit=50
 app.get('/api/admin/login-log', authRequired, ownerOnly, async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit || '50') || 50, 200);
