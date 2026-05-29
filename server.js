@@ -486,8 +486,75 @@ app.post('/api/auth/verify-otp', async (req, res) => {
 });
 
 // ── GET /api/auth/me ──────────────────────────────────────────
-app.get('/api/auth/me', authRequired, (req, res) => {
-  res.json({ success: true, user: { id: req.user.id, phone: req.user.phone_e164, role: req.user.role, name: req.user.name } });
+app.get('/api/auth/me', authRequired, async (req, res) => {
+  // hero_image_url을 함께 반환 (홈 hero 배경에 활용)
+  let heroImageUrl = null;
+  try {
+    const { data: u } = await supabase.from('admin_users')
+      .select('hero_image_url').eq('id', req.user.id).maybeSingle();
+    heroImageUrl = (u && u.hero_image_url) || null;
+  } catch (e) { /* optional column, ignore */ }
+  res.json({
+    success: true,
+    user: {
+      id: req.user.id,
+      phone: req.user.phone_e164,
+      role: req.user.role,
+      name: req.user.name,
+      hero_image_url: heroImageUrl
+    }
+  });
+});
+
+// ── 홈 화면 사진 hero 업로드/제거 ────────────────────────────
+// POST /api/user/hero-image — body: { imageBase64, imageMime }
+app.post('/api/user/hero-image', authRequired, ownerOnly, async (req, res) => {
+  try {
+    const { imageBase64, imageMime } = req.body || {};
+    if (!imageBase64 || !imageMime) {
+      return res.status(400).json({ success: false, error: '이미지 데이터 필수' });
+    }
+    if (!/^image\/(jpeg|png|webp|heic|heif)$/.test(imageMime)) {
+      return res.status(400).json({ success: false, error: '지원되지 않는 형식 (jpeg/png/webp/heic/heif)' });
+    }
+    const buf = Buffer.from(imageBase64, 'base64');
+    if (buf.length > 5 * 1024 * 1024) {
+      return res.status(400).json({ success: false, error: '이미지 5MB 이하' });
+    }
+    const ext = imageMime.split('/')[1].replace('jpeg', 'jpg');
+    // 사장님당 1장만 유지 — 고정 파일명 + upsert
+    const filePath = `${req.user.id}/hero.${ext}`;
+    const { error: upErr } = await supabase.storage
+      .from('ssak-hero-images')
+      .upload(filePath, buf, { contentType: imageMime, upsert: true });
+    if (upErr) {
+      console.error('hero upload error:', upErr.message);
+      return res.status(500).json({ success: false, error: '업로드 실패' });
+    }
+    const { data: pub } = supabase.storage.from('ssak-hero-images').getPublicUrl(filePath);
+    // 캐시 무효화 → ?v=timestamp 추가
+    const url = (pub && pub.publicUrl) + '?v=' + Date.now();
+    await supabase.from('admin_users').update({ hero_image_url: url }).eq('id', req.user.id);
+    res.json({ success: true, url });
+  } catch (e) {
+    console.error('POST /api/user/hero-image error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+// DELETE /api/user/hero-image — 본인 hero 제거
+app.delete('/api/user/hero-image', authRequired, ownerOnly, async (req, res) => {
+  try {
+    // 모든 확장자 시도 — 어떤 게 저장됐는지 모름
+    const exts = ['jpg', 'png', 'webp', 'heic', 'heif'];
+    const paths = exts.map(e => `${req.user.id}/hero.${e}`);
+    await supabase.storage.from('ssak-hero-images').remove(paths);
+    await supabase.from('admin_users').update({ hero_image_url: null }).eq('id', req.user.id);
+    res.json({ success: true });
+  } catch (e) {
+    console.error('DELETE /api/user/hero-image error:', e);
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
 // ════════════════════════════════════════════════════════════════
