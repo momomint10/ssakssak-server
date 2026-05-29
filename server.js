@@ -1060,6 +1060,58 @@ app.get('/api/stats', authRequired, ownerOnly, async (req, res) => {
   }
 });
 
+// ── 사장님 홈용 월간 통계 (이달 완료/매출/확정 + 지난달 매출 비교) ──
+app.get('/api/stats/monthly', authRequired, ownerOnly, async (req, res) => {
+  try {
+    const now = new Date();
+    const y = now.getFullYear(), m = now.getMonth(); // 0-indexed
+    const pad = n => String(n).padStart(2, '0');
+    const thisMonthStart = `${y}-${pad(m + 1)}-01`;
+    const nextY = m === 11 ? y + 1 : y;
+    const nextM = (m + 1) % 12;
+    const nextMonthStart = `${nextY}-${pad(nextM + 1)}-01`;
+    const lastY = m === 0 ? y - 1 : y;
+    const lastM = (m + 11) % 12;
+    const lastMonthStart = `${lastY}-${pad(lastM + 1)}-01`;
+
+    // 이달 + 지난달 booking을 한 번에 조회 (date 범위로 RLS 부담 ↓)
+    const { data, error } = await supabase
+      .from('bookings')
+      .select('status, price, date')
+      .gte('date', lastMonthStart)
+      .lt('date', nextMonthStart);
+    if (error) throw error;
+
+    let done = 0, revenue = 0, confirmed = 0, lastRevenue = 0;
+    (data || []).forEach(b => {
+      const isThisMonth = b.date >= thisMonthStart && b.date < nextMonthStart;
+      const isLastMonth = b.date >= lastMonthStart && b.date < thisMonthStart;
+      const price = parseInt(b.price) || 0;
+      if (isThisMonth) {
+        if (b.status === 'completed' || b.status === 'done') { done++; revenue += price; }
+        if (b.status === 'confirmed') confirmed++;
+      } else if (isLastMonth) {
+        if (b.status === 'completed' || b.status === 'done') lastRevenue += price;
+      }
+    });
+
+    // 지난달 매출이 0이면 비교 의미 없음 → null
+    const revenue_change_pct = lastRevenue > 0
+      ? Math.round(((revenue - lastRevenue) / lastRevenue) * 100)
+      : null;
+
+    res.json({
+      success: true,
+      done, revenue, confirmed,
+      revenue_change_pct,
+      last_month_revenue: lastRevenue
+    });
+  } catch (err) {
+    console.error('월간 통계 오류:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── SMS 발송 (CoolSMS) ────────────────────────
 app.post('/api/sms/send', authRequired, async (req, res) => {
   // ── 보안 강화: origin 검증 (curl/Postman 등 서버사이드 호출 차단) ──
