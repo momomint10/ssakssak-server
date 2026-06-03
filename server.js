@@ -1179,6 +1179,61 @@ app.get('/api/stats/monthly', authRequired, ownerOnly, async (req, res) => {
   }
 });
 
+// 주별 매출 추세 — 정산 tile sparkline용
+// GET /api/stats/weekly?weeks=6 → { success, weekly_revenue: [w1, w2, ...] }
+app.get('/api/stats/weekly', authRequired, ownerOnly, async (req, res) => {
+  try {
+    const weeks = Math.max(2, Math.min(12, parseInt(req.query.weeks) || 6));
+    const today = new Date();
+    // 월요일 기준 주 시작. 주차별 [start, end) 범위 생성.
+    const day = today.getDay(); // 0(일)~6(토)
+    const daysSinceMon = (day + 6) % 7;
+    const thisMonStart = new Date(today);
+    thisMonStart.setHours(0, 0, 0, 0);
+    thisMonStart.setDate(thisMonStart.getDate() - daysSinceMon);
+
+    const ranges = [];
+    for (let i = weeks - 1; i >= 0; i--) {
+      const s = new Date(thisMonStart);
+      s.setDate(s.getDate() - i * 7);
+      const e = new Date(s);
+      e.setDate(e.getDate() + 7);
+      ranges.push({ start: s, end: e });
+    }
+    const earliest = ranges[0].start;
+    const latest = ranges[ranges.length - 1].end;
+    const iso = d => d.toISOString().slice(0, 10);
+
+    const { data, error } = await supabase
+      .from('bookings')
+      .select('status, price, date')
+      .gte('date', iso(earliest))
+      .lt('date', iso(latest));
+    if (error) throw error;
+
+    const buckets = ranges.map(() => 0);
+    (data || []).forEach(b => {
+      if (b.status !== 'completed' && b.status !== 'done') return;
+      const bd = new Date(b.date);
+      const idx = ranges.findIndex(r => bd >= r.start && bd < r.end);
+      if (idx >= 0) buckets[idx] += parseInt(b.price) || 0;
+    });
+
+    // 만원 단위 반올림 (클라이언트 sparkline 부담 ↓)
+    const weekly_revenue = buckets.map(v => Math.round(v / 10000));
+
+    res.json({
+      success: true,
+      weeks,
+      weekly_revenue,
+      week_starts: ranges.map(r => iso(r.start))
+    });
+  } catch (err) {
+    console.error('주간 통계 오류:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── SMS 발송 (CoolSMS) ────────────────────────
 app.post('/api/sms/send', authRequired, async (req, res) => {
   // ── 보안 강화: origin 검증 (curl/Postman 등 서버사이드 호출 차단) ──
