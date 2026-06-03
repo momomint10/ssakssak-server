@@ -2046,6 +2046,63 @@ app.delete('/api/community/comments/:id', authRequired, async (req, res) => {
   }
 });
 
+// 내 커뮤니티 글에 달린 신규 댓글 여부 — 홈 dot 알림용
+// GET /api/community/unread?anon_id=X&since=ISO → { success, has_new, count }
+app.get('/api/community/unread', async (req, res) => {
+  try {
+    const { anon_id, since } = req.query;
+    if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필요' });
+    const sinceTs = since || new Date(Date.now() - 7 * 86400000).toISOString();
+
+    const { data: myPosts, error: pErr } = await supabase.from('community_posts')
+      .select('id').eq('anon_id', anon_id);
+    if (pErr) throw pErr;
+    const postIds = (myPosts || []).map(p => p.id);
+    if (postIds.length === 0) return res.json({ success: true, has_new: false, count: 0 });
+
+    const { count, error } = await supabase.from('community_comments')
+      .select('id', { count: 'exact', head: true })
+      .in('post_id', postIds)
+      .neq('anon_id', anon_id)
+      .gt('created_at', sinceTs);
+    if (error) throw error;
+
+    res.json({ success: true, has_new: (count || 0) > 0, count: count || 0 });
+  } catch (err) {
+    console.error('community/unread error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 내 거래 chat에 신규 메시지 여부 — 홈 dot 알림용
+// GET /api/market/unread?anon_id=X&since=ISO → { success, has_new, count }
+app.get('/api/market/unread', async (req, res) => {
+  try {
+    const { anon_id, since } = req.query;
+    if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필요' });
+    const sinceTs = since || new Date(Date.now() - 7 * 86400000).toISOString();
+
+    const { data: myChats, error: cErr } = await supabase.from('market_chats')
+      .select('id')
+      .or(`buyer_anon_id.eq.${anon_id},seller_anon_id.eq.${anon_id}`);
+    if (cErr) throw cErr;
+    const chatIds = (myChats || []).map(c => c.id);
+    if (chatIds.length === 0) return res.json({ success: true, has_new: false, count: 0 });
+
+    const { count, error } = await supabase.from('market_messages')
+      .select('id', { count: 'exact', head: true })
+      .in('chat_id', chatIds)
+      .neq('sender_anon_id', anon_id)
+      .gt('created_at', sinceTs);
+    if (error) throw error;
+
+    res.json({ success: true, has_new: (count || 0) > 0, count: count || 0 });
+  } catch (err) {
+    console.error('market/unread error:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ══════════════════════════════════════════════════════════════════════
 // Web Push API (Phase 3-A)
 // ══════════════════════════════════════════════════════════════════════
