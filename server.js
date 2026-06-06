@@ -4092,12 +4092,44 @@ app.get('/api/weather', async (req, res) => {
       return res.status(r.status).json({ success: false, error: `OpenWeatherMap ${r.status}: ${errBody.slice(0, 200)}` });
     }
     const raw = await r.json();
+
+    // 당일 최저/최고: forecast API 5일/3시간 데이터에서 오늘 KST 분량만 추출
+    // (current weather endpoint의 temp_min/max는 측정소 범위라 부정확)
+    let temp_min = Math.round(raw.main?.temp_min ?? raw.main?.temp ?? 0);
+    let temp_max = Math.round(raw.main?.temp_max ?? raw.main?.temp ?? 0);
+    try {
+      const fcUrl = `https://api.openweathermap.org/data/2.5/forecast?lat=${lat}&lon=${lon}&appid=${apiKey}&units=metric&cnt=8`;
+      const fcRes = await fetch(fcUrl);
+      if (fcRes.ok) {
+        const fcRaw = await fcRes.json();
+        // 한국 시간 기준 오늘 날짜 (KST = UTC+9)
+        const nowKst = new Date(Date.now() + 9 * 3600 * 1000);
+        const todayKstStr = nowKst.toISOString().slice(0, 10); // YYYY-MM-DD
+        const todayList = (fcRaw.list || []).filter(it => {
+          const dKst = new Date((it.dt + 9 * 3600) * 1000);
+          return dKst.toISOString().slice(0, 10) === todayKstStr;
+        });
+        if (todayList.length > 0) {
+          const temps = todayList.map(it => it.main?.temp).filter(t => typeof t === 'number');
+          if (temps.length > 0) {
+            temp_min = Math.round(Math.min(...temps, raw.main?.temp ?? Infinity));
+            temp_max = Math.round(Math.max(...temps, raw.main?.temp ?? -Infinity));
+          }
+        }
+      }
+    } catch (fcErr) {
+      // forecast 실패 시 raw.main.temp_min/max fallback (위에서 이미 세팅됨)
+      console.warn('[weather] forecast fallback:', fcErr.message);
+    }
+
     // 클라이언트에 필요한 핵심만 추출 (API key 누출 방지 + 응답 작게)
     const data = {
       main: raw.weather?.[0]?.main || 'Clear',        // Clear/Clouds/Rain/Snow/Thunderstorm/Drizzle/Mist
       description: raw.weather?.[0]?.description || '맑음',
       icon: raw.weather?.[0]?.icon || '01d',           // 01d=clear day, 01n=clear night, 02d=few clouds, ...
       temp: Math.round(raw.main?.temp ?? 0),
+      temp_min,
+      temp_max,
       feels_like: Math.round(raw.main?.feels_like ?? 0),
       humidity: raw.main?.humidity ?? 0,
       wind_speed: raw.wind?.speed ?? 0,
