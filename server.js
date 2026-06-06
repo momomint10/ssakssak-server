@@ -4030,3 +4030,85 @@ app.post('/api/market/chats/:id', async (req, res) => {
     res.json({ success:true, data });
   } catch(e) { res.status(500).json({ success:false, error: e.message }); }
 });
+
+// ═══════════════════════════════════════════════════════════════
+// V1.7.4: Weather proxy — OpenWeatherMap API 백엔드 프록시
+// API 키는 환경변수 OPENWEATHER_API_KEY로 보호 (클라이언트 노출 ✗)
+// 5분 메모리 캐시로 API rate limit 회피
+// ═══════════════════════════════════════════════════════════════
+const _weatherCache = new Map();
+const WEATHER_TTL_MS = 5 * 60 * 1000; // 5분
+// 한국 주요 자치구 lat/lon (회사 region이 없을 때 fallback)
+const REGION_COORDS = {
+  '강서구':   [37.5509, 126.8495],
+  '강남구':   [37.5172, 127.0473],
+  '서초구':   [37.4837, 127.0324],
+  '송파구':   [37.5145, 127.1059],
+  '강동구':   [37.5301, 127.1238],
+  '마포구':   [37.5663, 126.9018],
+  '용산구':   [37.5326, 126.9909],
+  '영등포구': [37.5263, 126.8962],
+  '동작구':   [37.5124, 126.9393],
+  '관악구':   [37.4784, 126.9516],
+  '서울':     [37.5665, 126.9780],
+  '부산':     [35.1796, 129.0756],
+  '대구':     [35.8714, 128.6014],
+  '인천':     [37.4563, 126.7052],
+  '광주':     [35.1595, 126.8526],
+  '대전':     [36.3504, 127.3845],
+  '울산':     [35.5384, 129.3114],
+};
+
+app.get('/api/weather', async (req, res) => {
+  try {
+    const apiKey = process.env.OPENWEATHER_API_KEY;
+    if (!apiKey) {
+      return res.status(503).json({ success: false, error: 'OPENWEATHER_API_KEY 환경변수 미설정' });
+    }
+
+    let { lat, lon, region } = req.query;
+    // region 우선, lat/lon fallback
+    if (region && REGION_COORDS[region]) {
+      [lat, lon] = REGION_COORDS[region];
+    } else if (!lat || !lon) {
+      [lat, lon] = REGION_COORDS['강서구']; // default
+    }
+    lat = parseFloat(lat); lon = parseFloat(lon);
+    if (isNaN(lat) || isNaN(lon)) {
+      return res.status(400).json({ success: false, error: 'lat/lon 또는 region 필요' });
+    }
+
+    const cacheKey = `${lat.toFixed(2)}_${lon.toFixed(2)}`;
+    const cached = _weatherCache.get(cacheKey);
+    const now = Date.now();
+    if (cached && (now - cached.ts) < WEATHER_TTL_MS) {
+      return res.json({ success: true, data: cached.data, cached: true, age_s: Math.round((now - cached.ts) / 1000) });
+    }
+
+    const url = `https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}&appid=${apiKey}&units=metric&lang=kr`;
+    const r = await fetch(url);
+    if (!r.ok) {
+      const errBody = await r.text();
+      return res.status(r.status).json({ success: false, error: `OpenWeatherMap ${r.status}: ${errBody.slice(0, 200)}` });
+    }
+    const raw = await r.json();
+    // 클라이언트에 필요한 핵심만 추출 (API key 누출 방지 + 응답 작게)
+    const data = {
+      main: raw.weather?.[0]?.main || 'Clear',        // Clear/Clouds/Rain/Snow/Thunderstorm/Drizzle/Mist
+      description: raw.weather?.[0]?.description || '맑음',
+      icon: raw.weather?.[0]?.icon || '01d',           // 01d=clear day, 01n=clear night, 02d=few clouds, ...
+      temp: Math.round(raw.main?.temp ?? 0),
+      feels_like: Math.round(raw.main?.feels_like ?? 0),
+      humidity: raw.main?.humidity ?? 0,
+      wind_speed: raw.wind?.speed ?? 0,
+      city: raw.name || '',
+      sunrise: raw.sys?.sunrise || 0,
+      sunset: raw.sys?.sunset || 0,
+      timestamp: raw.dt || Math.floor(Date.now() / 1000),
+    };
+    _weatherCache.set(cacheKey, { ts: now, data });
+    res.json({ success: true, data, cached: false });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
