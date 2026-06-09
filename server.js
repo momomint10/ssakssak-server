@@ -4144,3 +4144,67 @@ app.get('/api/weather', async (req, res) => {
     res.status(500).json({ success: false, error: e.message });
   }
 });
+
+// ═══════════════════════════════════════════════════════════════
+// V1.9.24: 점심 추천 — Kakao Local API 프록시 + 15분 캐시
+// KAKAO_REST_API_KEY 환경변수 필요 (Railway env)
+// 카테고리: FD6 = 음식점 (전체)
+// 키워드: 한식/국밥/한정식/분식 등 (옵션)
+// ═══════════════════════════════════════════════════════════════
+const _lunchCache = new Map();
+const LUNCH_TTL_MS = 15 * 60 * 1000; // 15분
+
+app.get('/api/lunch', async (req, res) => {
+  try {
+    const apiKey = process.env.KAKAO_REST_API_KEY;
+    if (!apiKey) {
+      return res.status(503).json({ success: false, error: 'KAKAO_REST_API_KEY 미설정' });
+    }
+    const { lat, lon } = req.query;
+    let { radius = 1000, category = 'FD6', keyword = '', size = 8 } = req.query;
+    const latNum = parseFloat(lat), lonNum = parseFloat(lon);
+    if (isNaN(latNum) || isNaN(lonNum)) {
+      return res.status(400).json({ success: false, error: 'lat/lon 필수' });
+    }
+    radius = Math.min(Math.max(parseInt(radius, 10) || 1000, 100), 20000);
+    size = Math.min(Math.max(parseInt(size, 10) || 8, 1), 15);
+
+    // 캐시 키 — 위치 100m 단위 + 카테고리/키워드 + radius
+    const cacheKey = `${latNum.toFixed(3)}_${lonNum.toFixed(3)}_${category}_${keyword}_${radius}_${size}`;
+    const cached = _lunchCache.get(cacheKey);
+    const now = Date.now();
+    if (cached && (now - cached.ts) < LUNCH_TTL_MS) {
+      return res.json({ success: true, data: cached.data, cached: true, age_s: Math.round((now - cached.ts) / 1000) });
+    }
+
+    // Kakao Local — 키워드 우선, 없으면 카테고리
+    let url;
+    if (keyword) {
+      url = `https://dapi.kakao.com/v2/local/search/keyword.json?query=${encodeURIComponent(keyword)}&x=${lonNum}&y=${latNum}&radius=${radius}&sort=distance&size=${size}&category_group_code=FD6`;
+    } else {
+      url = `https://dapi.kakao.com/v2/local/search/category.json?category_group_code=${category}&x=${lonNum}&y=${latNum}&radius=${radius}&sort=distance&size=${size}`;
+    }
+    const r = await fetch(url, { headers: { Authorization: `KakaoAK ${apiKey}` } });
+    if (!r.ok) {
+      const errBody = await r.text();
+      return res.status(r.status).json({ success: false, error: `Kakao ${r.status}: ${errBody.slice(0, 200)}` });
+    }
+    const raw = await r.json();
+    const places = (raw.documents || []).map(d => ({
+      id: d.id,
+      name: d.place_name,
+      category: (d.category_name || '').split(' > ').pop(), // 마지막 segment (예: "한식 > 한정식" → "한정식")
+      address: d.road_address_name || d.address_name || '',
+      phone: d.phone || '',
+      distance_m: parseInt(d.distance, 10) || 0,
+      x: parseFloat(d.x), // lon
+      y: parseFloat(d.y), // lat
+      url: d.place_url || '',
+    }));
+    const data = { places, total: raw.meta?.total_count || places.length };
+    _lunchCache.set(cacheKey, { ts: now, data });
+    res.json({ success: true, data, cached: false });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
