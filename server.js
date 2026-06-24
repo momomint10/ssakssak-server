@@ -2076,10 +2076,10 @@ app.get('/api/community/unread', async (req, res) => {
 
 // 내 거래 chat에 신규 메시지 여부 — 홈 dot 알림용
 // GET /api/market/unread?anon_id=X&since=ISO → { success, has_new, count }
-app.get('/api/market/unread', async (req, res) => {
+app.get('/api/market/unread', authRequired, async (req, res) => {
   try {
     const { anon_id, since } = req.query;
-    if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필요' });
+    if (!anon_id || !/^[A-Za-z0-9_-]{1,64}$/.test(anon_id)) return res.status(400).json({ success: false, error: 'anon_id 형식 오류' });  // 변종격리: 인증 + .or() 인젝션 방지
     const sinceTs = since || new Date(Date.now() - 7 * 86400000).toISOString();
 
     const { data: myChats, error: cErr } = await supabase.from('market_chats')
@@ -3608,7 +3608,7 @@ app.post('/api/jobs/:id/apply', authRequired, async (req, res) => {
 });
 
 // 지원자 목록 (공고 작성자만 — 보안 정책)
-app.get('/api/jobs/:id/applications', async (req, res) => {
+app.get('/api/jobs/:id/applications', authRequired, async (req, res) => {
   try {
     const { anon_id } = req.query;
     if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필수' });
@@ -3677,10 +3677,10 @@ function validateMsgContent(content) {
 
 // ── 1) 채팅방 목록 ──────────────────────────────────────────
 // 본인이 참여한 채팅방만 (worker 또는 requester)
-app.get('/api/worker-chats', async (req, res) => {
+app.get('/api/worker-chats', authRequired, async (req, res) => {
   try {
     const { anon_id } = req.query;
-    if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필요' });
+    if (!anon_id || !/^[A-Za-z0-9_-]{1,64}$/.test(anon_id)) return res.status(400).json({ success: false, error: 'anon_id 형식 오류' });  // 변종격리: 인증 + .or() 인젝션 방지
     const { data, error } = await supabase.from('worker_chats')
       .select('*, worker:worker_profiles(nickname,avatar_emoji,photo_url)')
       .or(`worker_anon_id.eq.${anon_id},requester_anon_id.eq.${anon_id}`)
@@ -3734,7 +3734,7 @@ app.post('/api/worker-chats', authRequired, async (req, res) => {
 
 // ── 3) 메시지 조회 (?after=<ISO>로 증분 로딩) ─────────────────
 // 본인 참여 검증 필수
-app.get('/api/worker-chats/:id/messages', async (req, res) => {
+app.get('/api/worker-chats/:id/messages', authRequired, async (req, res) => {
   try {
     const { id } = req.params;
     const { anon_id, after } = req.query;
@@ -3841,10 +3841,10 @@ app.post('/api/worker-chats/:id/read', authRequired, async (req, res) => {
 
 // ── 6) 미확인 메시지 카운트 (배지용 — Phase 3-B) ─────────────
 // 본인이 참여한 모든 채팅방의 unread 합산. 가벼운 쿼리로 폴링용.
-app.get('/api/worker-chats/unread-count', async (req, res) => {
+app.get('/api/worker-chats/unread-count', authRequired, async (req, res) => {
   try {
     const { anon_id } = req.query;
-    if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필요' });
+    if (!anon_id || !/^[A-Za-z0-9_-]{1,64}$/.test(anon_id)) return res.status(400).json({ success: false, error: 'anon_id 형식 오류' });  // 변종격리: 인증 + .or() 인젝션 방지
     const { data, error } = await supabase.from('worker_chats')
       .select('worker_anon_id, requester_anon_id, worker_unread, requester_unread')
       .or(`worker_anon_id.eq.${anon_id},requester_anon_id.eq.${anon_id}`);
@@ -3967,10 +3967,10 @@ app.delete('/api/market/listings/:id', authRequired, async (req, res) => {
 });
 
 // 채팅방 목록
-app.get('/api/market/chats', async (req, res) => {
+app.get('/api/market/chats', authRequired, async (req, res) => {
   try {
     const { anon_id } = req.query;
-    if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필요' });
+    if (!anon_id || !/^[A-Za-z0-9_-]{1,64}$/.test(anon_id)) return res.status(400).json({ success: false, error: 'anon_id 형식 오류' });  // 변종격리: 인증 + .or() 인젝션 방지
     const { data, error } = await supabase.from('market_chats').select('*, listing:market_listings(title,image_url,price)').or(`buyer_anon_id.eq.${anon_id},seller_anon_id.eq.${anon_id}`).order('updated_at',{ascending:false});
     if (error) throw error;
     res.json({ success:true, data: data||[] });
