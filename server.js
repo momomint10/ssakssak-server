@@ -2295,9 +2295,11 @@ app.post('/api/push/test-reminder', async (req, res) => {
 app.post('/api/booking', async (req, res) => {
   try {
     // ⚠️ 보안: 클라이언트 apiKey/apiSecret 무시 (환경변수 기반 sendSMSUtil 사용)
-    const { name, phone, size, type, date, time, notes, ownerPhone } = req.body || {};
+    const { name, phone, size, type, date, time, notes, ownerPhone, owner_id: ownerIdRaw } = req.body || {};
     // address ↔ addr 둘 다 호환 (booking.html은 address, 서버는 addr 사용해왔음)
     const addrInput = req.body?.addr || req.body?.address || '';
+    // 멀티테넌트: 예약 링크(?o=<사장님 id>)로 전달된 owner_id 저장 (uuid 형식만, 없으면 null)
+    const owner_id = (typeof ownerIdRaw === 'string' && /^[0-9a-fA-F-]{36}$/.test(ownerIdRaw)) ? ownerIdRaw : null;
 
     _diagStats.bookingPostCount++;
     _diagStats.lastBookingPostAt = new Date().toISOString();
@@ -2329,8 +2331,10 @@ app.post('/api/booking', async (req, res) => {
       time: String(time || '').slice(0, 20),
       notes: String(notes || '').slice(0, 500),
       status: 'pending',
+      owner_id: owner_id,
       created_at: new Date().toISOString()
     };
+    if (!owner_id) console.log('⚠️ booking owner_id 미전달 (구 링크?) — 예약 owner 미귀속');
 
     const { data, error } = await supabase.from('bookings').insert([bookingData]).select().single();
     if (error) {
@@ -2373,7 +2377,8 @@ app.get('/api/bookings', authRequired, ownerOnly, async (req, res) => {
   try {
     const status = req.query.status || null;
     const date = req.query.date || null;
-    let query = supabase.from('bookings').select('*').order('created_at', { ascending: false });
+    // 멀티테넌트 격리: 로그인한 사장님 본인 예약만 (owner_id = req.user.id)
+    let query = supabase.from('bookings').select('*').eq('owner_id', req.user.id).order('created_at', { ascending: false });
     if (status) query = query.eq('status', status);
     if (date) query = query.eq('date', date);
     const { data, error } = await query;
@@ -2388,7 +2393,8 @@ app.patch('/api/bookings/:id', authRequired, ownerOnly, async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
-    const { data, error } = await supabase.from('bookings').update({ status }).eq('id', id).select().single();
+    // 멀티테넌트 격리: 본인(owner_id) 예약만 수정 가능 (IDOR 방지)
+    const { data, error } = await supabase.from('bookings').update({ status }).eq('id', id).eq('owner_id', req.user.id).select().single();
     if (error) throw error;
     res.json({ success: true, data });
   } catch (err) {
@@ -2405,6 +2411,7 @@ app.put('/api/bookings/:id/status', authRequired, ownerOnly, async (req, res) =>
       .from('bookings')
       .update({ status })
       .eq('id', id)
+      .eq('owner_id', req.user.id)  // 멀티테넌트 격리: 본인 예약만
       .select()
       .single();
 
@@ -2442,7 +2449,8 @@ app.post('/api/booking/token', authRequired, async (req, res) => {
       size: String(size).slice(0, 10),
       type: String(type||'').slice(0, 30),
       price: String(price||'').slice(0, 12),
-      companyName: String(companyName||'서프로클린').slice(0, 50)
+      companyName: String(companyName||'서프로클린').slice(0, 50),
+      owner_id: req.user.id  // 멀티테넌트: 토큰 생성한 사장님 = 예약 owner (인증 기반, 안전)
     };
 
     const { error } = await supabase.from('booking_tokens').insert([{ token, quote_data }]);
