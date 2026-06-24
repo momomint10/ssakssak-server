@@ -1652,7 +1652,7 @@ app.post('/api/contract/:token/sign', async (req, res) => {
 
 // ── 스케줄 (사장님 직접 관리) ──────────────────────────────────────────────
 // 본인 anon_id 기준 전체 조회 (옵션: status, from, to 날짜 필터)
-app.get('/api/schedules', async (req, res) => {
+app.get('/api/schedules', authRequired, async (req, res) => {  // F3: 무인증 고객 PII 조회 차단
   try {
     const { anon_id, status, from, to } = req.query;
     if (!anon_id) return res.status(400).json({ success: false, error: 'anon_id 필수' });
@@ -2324,11 +2324,11 @@ app.post('/api/booking', async (req, res) => {
     const bookingData = {
       name: cleanName,
       phone: cleanPhone,
-      addr: String(addrInput).slice(0, 200),
+      address: String(addrInput).slice(0, 200),
       size: String(size || '').slice(0, 10),
       type: String(type || '입주 전 청소').slice(0, 30),
-      date: String(date || '').slice(0, 20),
-      time: String(time || '').slice(0, 20),
+      preferred_date: String(date || '').slice(0, 20),
+      preferred_time: String(time || '').slice(0, 20),
       notes: String(notes || '').slice(0, 500),
       status: 'pending',
       owner_id: owner_id,
@@ -2353,7 +2353,7 @@ app.post('/api/booking', async (req, res) => {
     if (ownerPhone) {
       const cleanOwner = String(ownerPhone).replace(/[^0-9]/g, '');
       if (cleanOwner.length >= 8) {
-        const msg = `[싹싹] 새 예약신청이 왔습니다!\n고객: ${cleanName} (${cleanPhone})\n날짜: ${bookingData.date} ${bookingData.time}\n유형: ${bookingData.type} ${bookingData.size}평\n주소: ${bookingData.addr}\n앱에서 확인하세요.`;
+        const msg = `[싹싹] 새 예약신청이 왔습니다!\n고객: ${cleanName} (${cleanPhone})\n날짜: ${bookingData.preferred_date} ${bookingData.preferred_time}\n유형: ${bookingData.type} ${bookingData.size}평\n주소: ${bookingData.address}\n앱에서 확인하세요.`;
         sendSMSUtil(cleanOwner, msg, '[싹싹] 새 예약신청', {
           type: 'general', customerName: cleanName, meta: { stage: 'booking-alert', bookingId: data?.id }
         })
